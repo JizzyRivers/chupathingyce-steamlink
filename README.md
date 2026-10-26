@@ -27,7 +27,7 @@ trying the probe
 - send me probe.log (it's next to the program, ssh in to grab it)
 
 building
-github actions builds it w valve's sdk (https://github.com/ValveSoftware/steamlink-sdk) so u just need linux if u do it urself: clone the sdk next to this as steamlink-sdk, build sdl3 like .github/workflows/probe.yml does, then probe/build_steamlink.sh
+github actions builds it w valve's sdk (https://github.com/ValveSoftware/steamlink-sdk) so u just need linux if u do it urself: clone the sdk next to this as steamlink-sdk, build sdl3 into it like .github/workflows/probe.yml does, then probe/build_steamlink.sh
 
 chupathingyce is the game (submodule)
 
