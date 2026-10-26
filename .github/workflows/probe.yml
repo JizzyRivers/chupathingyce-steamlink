@@ -27,7 +27,7 @@ jobs:
       - name: Install the build tools
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build file
 
-      # saved straight after the fetch, before SDL3 goes into its root filesystem
+      # saved straight after the fetch, as valve made it
       - uses: actions/cache/restore@v4
         id: sdk
         with:
@@ -59,9 +59,9 @@ jobs:
           ls steamlink-sdk/rootfs/usr/lib | grep -iE 'egl|gles|sdl' || true
 
       # console only (SDL_UNIX_CONSOLE_BUILD): the box has no X11 or Wayland,
-      # its screen is SDL's vivante driver. installed into the sdk's root
-      # filesystem, as /usr, the way the sdk installs its own libraries
-      # (setenv.sh: steamlink_make_install). no pulseaudio: the sdk has its
+      # its screen is SDL's vivante driver. in a folder of its own: the sdk's
+      # root filesystem has valve's own SDL3 (3.1.5, firmware build 890),
+      # which the probe mustn't pick up. no pulseaudio: the sdk has its
       # libpulse.pc but not the library, and SDL3 loads alsa off the box anyway
       - name: Build SDL3
         run: |
@@ -72,11 +72,11 @@ jobs:
           cmake -S build/SDL -B build/SDL/build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/sdl3" \
             -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
             -DSDL_PULSEAUDIO=OFF -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_VULKAN=OFF -DSDL_OPENGL=OFF -DSDL_OPENGLES=ON
           cmake --build build/SDL/build
-          DESTDIR="$MARVELL_ROOTFS" cmake --install build/SDL/build
+          cmake --install build/SDL/build
           grep -E 'SDL_VIDEO_DRIVER_[A-Z]+ ' build/SDL/build/include-config-release/build_config/SDL_build_config.h || true
 
       - name: Build the probe
