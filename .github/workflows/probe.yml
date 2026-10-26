@@ -61,7 +61,8 @@ jobs:
       # console only (SDL_UNIX_CONSOLE_BUILD): the box has no X11 or Wayland,
       # its screen is SDL's vivante driver. installed into the sdk's root
       # filesystem, as /usr, the way the sdk installs its own libraries
-      # (setenv.sh: steamlink_make_install), so its sdl3.pc finds libpulse
+      # (setenv.sh: steamlink_make_install). no pulseaudio: the sdk has its
+      # libpulse.pc but not the library, and SDL3 loads alsa off the box anyway
       - name: Build SDL3
         run: |
           git clone -q --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git build/SDL
@@ -73,7 +74,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
-            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_VULKAN=OFF -DSDL_OPENGL=OFF -DSDL_OPENGLES=ON
+            -DSDL_PULSEAUDIO=OFF -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_VULKAN=OFF -DSDL_OPENGL=OFF -DSDL_OPENGLES=ON
           cmake --build build/SDL/build
           DESTDIR="$MARVELL_ROOTFS" cmake --install build/SDL/build
           grep -E 'SDL_VIDEO_DRIVER_[A-Z]+ ' build/SDL/build/include-config-release/build_config/SDL_build_config.h || true

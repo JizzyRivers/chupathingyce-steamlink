@@ -18,7 +18,7 @@ set -u
 OUT="${ROOT}/build/probe"
 mkdir -p "${OUT}"
 # SDL3 static, so the app is the one file, and what SDL3 links in turn
-# (pulseaudio, its libraries off the box) from its sdl3.pc
+# from its sdl3.pc
 SDL3_FLAGS=$(pkg-config --static --cflags --libs sdl3)
 # CC is the sdk's compiler and its flags, split on purpose
 # shellcheck disable=SC2086
