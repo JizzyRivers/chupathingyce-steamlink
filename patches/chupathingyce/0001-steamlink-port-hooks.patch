@@ -1,0 +1,310 @@
+diff --git a/port/linux/include/halo_linux_prefix.h b/port/linux/include/halo_linux_prefix.h
+index d05919f..0ecb818 100644
+--- a/port/linux/include/halo_linux_prefix.h
++++ b/port/linux/include/halo_linux_prefix.h
+@@ -10,8 +10,8 @@ byte-for-byte identical to what the matching MSVC build compiles.
+ #ifndef __HALO_LINUX_PREFIX_H
+ #define __HALO_LINUX_PREFIX_H
+ 
+-#if !defined(__i386__) && !defined(HALO_ANDROID) && !defined(HALO_64BIT)
+-#error the Linux port targets 32-bit x86: game data structures assume 32-bit pointers
++#if !defined(__i386__) && !defined(__arm__) && !defined(HALO_ANDROID) && !defined(HALO_64BIT)
++#error the Linux port targets 32-bit x86 or ARM: game data structures assume 32-bit pointers
+ #endif
+ 
+ /* ---------- musl's wide characters (the static dedicated servers,
+diff --git a/port/linux/include/wchar.h b/port/linux/include/wchar.h
+index 24bff14..4f800a3 100644
+--- a/port/linux/include/wchar.h
++++ b/port/linux/include/wchar.h
+@@ -11,6 +11,14 @@ MSVC (pre-C99) signatures are kept: wcstok() takes two arguments and
+ swprintf()/vswprintf() take no buffer size.
+ */
+ 
++/* glibc 2.25 and older (the Steam Link's 2.19): its <stdio.h> asks
++<wchar.h> for __mbstate_t alone (__need_mbstate_t, from _G_config.h), which
++glibc's own gives without its wide functions; the rest of this header is
++for the game's own includes */
++#if defined(__need_mbstate_t) && !defined(_WCHAR_H)
++#include_next <wchar.h>
++#else
++
+ #ifndef __HALO_LINUX_WCHAR_H
+ #define __HALO_LINUX_WCHAR_H
+ 
+@@ -193,3 +201,5 @@ FILE *_wfdopen(int handle, const wchar_t *mode);
+ #endif
+ 
+ #endif
++
++#endif
+diff --git a/port/linux/src/browser.c b/port/linux/src/browser.c
+index 0da5d82..f558da8 100644
+--- a/port/linux/src/browser.c
++++ b/port/linux/src/browser.c
+@@ -1285,10 +1285,12 @@ static const char *build_architecture(void)
+ 	return "arm64";
+ #elif defined(__x86_64__) || defined(_M_X64)
+ 	return "x64";
+-#elif defined(__i386__) || defined(_M_IX86)
+-	return "x86";
++/* (32-bit ARM ahead of _M_IX86, which halo_linux_prefix.h defines for the
++XDK's headers on every 32-bit build) */
+ #elif defined(__arm__) || defined(_M_ARM)
+ 	return "arm";
++#elif defined(__i386__) || defined(_M_IX86)
++	return "x86";
+ #else
+ 	return "";
+ #endif
+diff --git a/port/linux/src/build_identity.c b/port/linux/src/build_identity.c
+index e6cead8..f9ac423 100644
+--- a/port/linux/src/build_identity.c
++++ b/port/linux/src/build_identity.c
+@@ -51,6 +51,10 @@ HALO_BUILD_FLAVOR.
+ #define BUILD_IDENTITY_ARCHITECTURE "arm64"
+ #elif defined(__x86_64__) || defined(_M_X64)
+ #define BUILD_IDENTITY_ARCHITECTURE "x64"
++/* (32-bit ARM ahead of _M_IX86, which halo_linux_prefix.h defines for the
++XDK's headers on every 32-bit build) */
++#elif defined(__arm__)
++#define BUILD_IDENTITY_ARCHITECTURE "arm"
+ #elif defined(__i386__) || defined(_M_IX86)
+ #define BUILD_IDENTITY_ARCHITECTURE "x86"
+ #else
+diff --git a/port/linux/src/memory_watch.c b/port/linux/src/memory_watch.c
+index b78ff32..c3626ef 100644
+--- a/port/linux/src/memory_watch.c
++++ b/port/linux/src/memory_watch.c
+@@ -240,15 +240,28 @@ static void fault_handler(int signal_number, siginfo_t *information, void *conte
+ 		void *frames[48];
+ 		int count, length;
+ 
++#if defined(__arm__)
++		/* (32-bit ARM: a call leaves its return address in lr, not on the
++		stack) */
++		length = snprintf(line, sizeof(line),
++			PLATFORM_LOG_PREFIX "segmentation fault at %p, pc %08x lr %08x fp %08x sp %08x\n",
++			information->si_addr, (unsigned)ucontext->uc_mcontext.arm_pc, (unsigned)ucontext->uc_mcontext.arm_lr,
++			(unsigned)ucontext->uc_mcontext.arm_fp, (unsigned)ucontext->uc_mcontext.arm_sp);
++#else
+ 		length = snprintf(line, sizeof(line),
+ 			PLATFORM_LOG_PREFIX "segmentation fault at %p, eip %08x ebp %08x esp %08x\n",
+ 			information->si_addr, (unsigned)ucontext->uc_mcontext.gregs[REG_EIP],
+ 			(unsigned)ucontext->uc_mcontext.gregs[REG_EBP], (unsigned)ucontext->uc_mcontext.gregs[REG_ESP]);
++#endif
+ 		write(STDERR_FILENO, line, (size_t)length);
+ 		crash_debug_line(line);
+ 		{
+ 			/* the return address a call through a bad pointer left behind */
++#if defined(__arm__)
++			const unsigned *stack = (const unsigned *)ucontext->uc_mcontext.arm_sp;
++#else
+ 			const unsigned *stack = (const unsigned *)ucontext->uc_mcontext.gregs[REG_ESP];
++#endif
+ 
+ 			length = snprintf(line, sizeof(line), PLATFORM_LOG_PREFIX "stack %08x %08x %08x %08x %08x %08x\n",
+ 				stack[0], stack[1], stack[2], stack[3], stack[4], stack[5]);
+diff --git a/port/linux/src/msvc_crt.c b/port/linux/src/msvc_crt.c
+index 3c0ccc2..c502bea 100644
+--- a/port/linux/src/msvc_crt.c
++++ b/port/linux/src/msvc_crt.c
+@@ -302,12 +302,25 @@ static unsigned short msvc_to_control_word(unsigned int value, unsigned short wo
+ 	return word;
+ }
+ 
+-#if defined(HALO_ANDROID) || defined(__aarch64__)
++#if defined(HALO_ANDROID) || defined(__aarch64__) || defined(__arm__)
+ /* AArch64: the rounding mode lives in FPCR.RMode, the sticky exception
+ flags in FPSR. Precision control and exception unmasking have no
+-equivalent; the rest of the MSVC control word is only remembered. */
++equivalent; the rest of the MSVC control word is only remembered. 32-bit
++ARM (VFP) has both in FPSCR, at the same bits */
+ static unsigned int msvc_control_word = CW_DEFAULT;
+ 
++#if defined(__arm__)
++#define ARM_FP_CONTROL_READ() ((unsigned long long)__builtin_arm_get_fpscr())
++#define ARM_FP_CONTROL_WRITE(value) __builtin_arm_set_fpscr((unsigned int)(value))
++#define ARM_FP_STATUS_READ() ARM_FP_CONTROL_READ()
++#define ARM_FP_STATUS_WRITE(value) ARM_FP_CONTROL_WRITE(value)
++#else
++#define ARM_FP_CONTROL_READ() __builtin_arm_rsr64("fpcr")
++#define ARM_FP_CONTROL_WRITE(value) __builtin_arm_wsr64("fpcr", (value))
++#define ARM_FP_STATUS_READ() __builtin_arm_rsr64("fpsr")
++#define ARM_FP_STATUS_WRITE(value) __builtin_arm_wsr64("fpsr", (value))
++#endif
++
+ unsigned int _control87(unsigned int new_value, unsigned int mask)
+ {
+ 	unsigned long long fpcr;
+@@ -315,7 +328,7 @@ unsigned int _control87(unsigned int new_value, unsigned int mask)
+ 	if (mask)
+ 	{
+ 		msvc_control_word = (msvc_control_word & ~mask) | (new_value & mask);
+-		fpcr = __builtin_arm_rsr64("fpcr");
++		fpcr = ARM_FP_CONTROL_READ();
+ 		fpcr &= ~(3ULL << 22);
+ 		switch (msvc_control_word & _MCW_RC)
+ 		{
+@@ -324,7 +337,7 @@ unsigned int _control87(unsigned int new_value, unsigned int mask)
+ 		case _RC_CHOP: fpcr |= 3ULL << 22; break;
+ 		default: break;
+ 		}
+-		__builtin_arm_wsr64("fpcr", fpcr);
++		ARM_FP_CONTROL_WRITE(fpcr);
+ 	}
+ 	return msvc_control_word;
+ }
+@@ -337,7 +350,7 @@ unsigned int _controlfp(unsigned int new_value, unsigned int mask)
+ 
+ unsigned int _statusfp(void)
+ {
+-	unsigned long long fpsr = __builtin_arm_rsr64("fpsr");
++	unsigned long long fpsr = ARM_FP_STATUS_READ();
+ 	unsigned int result = 0;
+ 
+ 	/* as the x87 status word's low bits: invalid, denormal, zero divide,
+@@ -355,9 +368,18 @@ unsigned int _clearfp(void)
+ {
+ 	unsigned int status = _statusfp();
+ 
+-	__builtin_arm_wsr64("fpsr", __builtin_arm_rsr64("fpsr") & ~0x9fULL);
++	ARM_FP_STATUS_WRITE(ARM_FP_STATUS_READ() & ~0x9fULL);
+ 	return status;
+ }
++
++#if defined(__arm__)
++/* MSVC's compiler barrier (scenario.c), a builtin of clang's on x86 but not
++on 32-bit ARM: a call is a barrier already */
++void _ReadWriteBarrier(void)
++{
++	__asm__ volatile ("" ::: "memory");
++}
++#endif
+ #elif defined(__PPC__)
+ /* PowerPC (the Wii U): the rounding mode is the FPSCR's RN field, the sticky
+ exception flags its OX, UX, ZX, XX and VX* bits. As on AArch64, precision
+diff --git a/port/linux/src/posix_crash.c b/port/linux/src/posix_crash.c
+index ecf8c92..991cf26 100644
+--- a/port/linux/src/posix_crash.c
++++ b/port/linux/src/posix_crash.c
+@@ -176,6 +176,9 @@ static void context_registers(void *context, uintptr_t *pc, uintptr_t *frame)
+ #elif defined(__linux__) && defined(__i386__)
+ 	*pc = (uintptr_t)ucontext->uc_mcontext.gregs[REG_EIP];
+ 	*frame = (uintptr_t)ucontext->uc_mcontext.gregs[REG_EBP];
++#elif defined(__linux__) && defined(__arm__)
++	*pc = (uintptr_t)ucontext->uc_mcontext.arm_pc;
++	*frame = (uintptr_t)ucontext->uc_mcontext.arm_fp;
+ #else
+ 	(void)ucontext;
+ 	*pc = 0;
+diff --git a/port/linux/src/posix_net.c b/port/linux/src/posix_net.c
+index f545dcf..46dae40 100644
+--- a/port/linux/src/posix_net.c
++++ b/port/linux/src/posix_net.c
+@@ -24,6 +24,11 @@ with the host ABI.
+ #include <crt_externs.h>
+ #include <uuid/uuid.h>
+ #include <stdlib.h>
++#elif defined(__GLIBC__) && !__GLIBC_PREREQ(2, 25)
++/* glibc before 2.25 (the Steam Link's 2.19) has no getrandom, and its
++kernel (3.8) no system call for it: /dev/urandom, below */
++#include <errno.h>
++#define getrandom(buffer, size, flags) (errno = ENOSYS, (ssize_t)-1)
+ #else
+ #include <sys/random.h>
+ #include <sys/random.h>
+diff --git a/port/linux/src/xbox_memory.c b/port/linux/src/xbox_memory.c
+index 30a96ae..d36cd77 100644
+--- a/port/linux/src/xbox_memory.c
++++ b/port/linux/src/xbox_memory.c
+@@ -39,6 +39,12 @@ Xbox kernel does.
+ 
+ #include "platform.h"
+ 
++/* (Linux 4.17's; glibc before 2.28 has no name for it, and an older kernel
++takes the address as a hint, which every caller here checks it got) */
++#ifndef MAP_FIXED_NOREPLACE
++#define MAP_FIXED_NOREPLACE 0x100000
++#endif
++
+ #include <errno.h>
+ #ifdef HALO_ANDROID
+ #include <stdio.h>
+diff --git a/source/hs/hs_runtime.c b/source/hs/hs_runtime.c
+index a560c4e..4a3cbef 100644
+--- a/source/hs/hs_runtime.c
++++ b/source/hs/hs_runtime.c
+@@ -2958,8 +2958,9 @@ static void *hs_stack_allocate(
+ 		return NULL;
+ 	}
+ 
+-#if defined(__powerpc__) || defined(__ppc__) || defined(_M_PPC)
+-	/* port: a PowerPC faults on a misaligned float (a script's arithmetic
++#if defined(__powerpc__) || defined(__ppc__) || defined(_M_PPC) || defined(__arm__)
++	/* port: a PowerPC (and 32-bit ARM, whose VFP loads fault the same)
++	faults on a misaligned float (a script's arithmetic
+ 	put its reals after a short): allocations start on 4 bytes there; the
+ 	Xbox's layout is kept elsewhere */
+ 	{
+diff --git a/source/models/model_animations.c b/source/models/model_animations.c
+index e766f9c..74ba14f 100644
+--- a/source/models/model_animations.c
++++ b/source/models/model_animations.c
+@@ -154,10 +154,11 @@ symbols in this file:
+ #include "models/model_definitions.h"
+ #include "objects/objects.h"
+ 
+-/* port: a PowerPC's float loads need their 4 bytes aligned, and a map's
+-keyframes are where the map put them: there they are copied out before
+-use; elsewhere they are read in place, as the Xbox read them */
+-#if defined(__powerpc__) || defined(__PPC__) || defined(_M_PPC)
++/* port: a PowerPC's float loads need their 4 bytes aligned (32-bit ARM's
++VFP loads too), and a map's keyframes are where the map put them: there
++they are copied out before use; elsewhere they are read in place, as the
++Xbox read them */
++#if defined(__powerpc__) || defined(__PPC__) || defined(_M_PPC) || defined(__arm__)
+ #define ANIMATION_ALIGNED_COPIES 1
+ #endif
+ 
+diff --git a/tools/linux_build.py b/tools/linux_build.py
+index a84ceea..555ea41 100644
+--- a/tools/linux_build.py
++++ b/tools/linux_build.py
+@@ -545,12 +545,25 @@ class Linux32Units:
+     # the portable build's system root and SDL's headers, after the
+     # instruction set, for every unit (PortableSdl.cflags)
+     sysroot_flags: List[str] = field(default_factory=list)
++    # the instruction set, in place of march_flag's x86 one (a 32-bit ARM
++    # console's: the Steam Link's)
++    instruction_set: Optional[List[str]] = None
++
++
++# the ABI flags only x86 has, which clang rejects for another target: the
++# 32-bit ARM ABI already aligns doubles as MSVC does, and returns a structure
++# of 4 bytes or less in r0
++X86_ABI_FLAGS = ("-malign-double", "-freg-struct-return")
+ 
+ 
+ def _retarget(flags: List[str], target_flags: List[str]) -> List[str]:
+     """flags (LINUX_ABI_FLAGS or POSIX_FLAGS) for another target"""
+     assert flags[:len(LINUX_TARGET_FLAGS)] == LINUX_TARGET_FLAGS
+-    return [*target_flags, *flags[len(LINUX_TARGET_FLAGS):]]
++    rest = flags[len(LINUX_TARGET_FLAGS):]
++    if not any(flag.startswith(("--target=i686", "--target=i386", "--target=x86")) or flag == "-m32"
++               for flag in target_flags):
++        rest = [flag for flag in rest if flag not in X86_ABI_FLAGS]
++    return [*target_flags, *rest]
+ 
+ 
+ def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags: List[str],
+@@ -563,7 +576,8 @@ def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags:
+     platform_semantics_header = units.platform_semantics_header
+     browser_defines = ["-DHALO_GAME_BROWSER"] if units.game_browser else []
+     # the instruction set, and the portable build's system root
+-    target = [march_flag(sln), *units.sysroot_flags]
++    target = [*(units.instruction_set if units.instruction_set is not None else [march_flag(sln)]),
++              *units.sysroot_flags]
+     # (a debug build checks its stack frames, and stops at the first one
+     # overrun, as it stops at the first failed assertion; a release build
+     # does not, so that an overrun nobody has met cannot end a game)
