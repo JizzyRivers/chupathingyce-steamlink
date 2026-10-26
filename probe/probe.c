@@ -1,9 +1,11 @@
-// The Steam Link probe: before the game, what the box gives SDL3. It lists
-// SDL3's video drivers, opens a full-screen OpenGL ES 2.0 window, logs the
-// GL driver and its extensions, cycles the screen's colour and logs every
-// controller and button. Start + Back (or a minute) quits.
-//
-// The log goes to probe.log next to the program and to standard output.
+/*
+ * the probe: what the steam link gives SDL3, before any of the game. its
+ * video drivers, a full screen OpenGL ES 2.0 window, the GL driver and its
+ * extensions, the screen cycling colour, and every controller and button.
+ * start + back (or a minute) quits
+ *
+ * the log: probe.log next to the program, and standard output
+ */
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -11,6 +13,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+/* the few GL ES 2.0 names it needs, without the headers (SDL loads GL) */
 #define GL_VENDOR 0x1F00
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
@@ -44,6 +47,7 @@ static void probe_log(const char *format, ...)
 	}
 }
 
+/* next to the program, or /tmp when the app's folder can't be written */
 static void probe_open_log(void)
 {
 	char path[1024];
@@ -83,6 +87,7 @@ int main(int argc, char **argv)
 	}
 	probe_log("video driver in use: %s", SDL_GetCurrentVideoDriver());
 
+	/* ES 2.0: all the box's GPU has (the game's own GL path is ES 3.2) */
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -113,6 +118,7 @@ int main(int argc, char **argv)
 		return 4;
 	}
 
+	/* what a GLES2 renderer for the game would have to work with */
 	probe_log("gl vendor: %s", gl_get_string(GL_VENDOR));
 	probe_log("gl renderer: %s", gl_get_string(GL_RENDERER));
 	probe_log("gl version: %s", gl_get_string(GL_VERSION));
@@ -156,6 +162,7 @@ int main(int argc, char **argv)
 			}
 		}
 
+		/* the colour cycling: a frame the eye can see is a working swap */
 		float t = (float)(SDL_GetTicks() - start) / 1000.0f;
 		gl_clear_color(0.5f + 0.5f * SDL_sinf(t), 0.5f + 0.5f * SDL_sinf(t + 2.1f), 0.5f + 0.5f * SDL_sinf(t + 4.2f), 1.0f);
 		gl_clear(GL_COLOR_BUFFER_BIT);

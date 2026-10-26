@@ -1,7 +1,7 @@
-# Builds the probe (probe/) for the Steam Link with Valve's SDK: SDL3 at
-# chupathingyce's pin, cross-compiled with the SDK's toolchain against its
-# root filesystem, then the probe linked to it and packed as a Steam Link
-# app. The artifact's steamlink folder goes on a USB drive.
+# the probe (probe/) for the steam link, w valve's sdk: SDL3 at
+# chupathingyce's pin, cross compiled w the sdk's toolchain against its root
+# filesystem, then the probe linked to it and packed as a steam link app.
+# the artifact's steamlink folder goes on a usb drive
 name: Probe
 
 on:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 env:
-  # Valve's steamlink-sdk, master on 2025-03-17
+  # valve's steamlink-sdk, master on 2025-03-17
   STEAMLINK_SDK_COMMIT: 62b4d098d1472c3534dd098ca2a0e0e10712f1c6
   # chupathingyce's pin (tools/android_build.py: SDL_TAG, SDL_COMMIT)
   SDL_TAG: release-3.4.16
@@ -33,7 +33,7 @@ jobs:
           path: steamlink-sdk
           key: steamlink-sdk-${{ env.STEAMLINK_SDK_COMMIT }}
 
-      # only the toolchain and the root filesystem: the SDK is 3 GB whole
+      # the toolchain and the root filesystem only: the whole sdk is 3 GB
       - name: Fetch the Steam Link SDK
         if: steps.sdk.outputs.cache-hit != 'true'
         run: |
@@ -51,6 +51,8 @@ jobs:
           armv7a-cros-linux-gnueabi-gcc --version | head -1
           ls steamlink-sdk/rootfs/usr/lib | grep -iE 'egl|gles|sdl' || true
 
+      # console only (SDL_UNIX_CONSOLE_BUILD): the box has no X11 or Wayland,
+      # its screen is SDL's vivante driver
       - name: Build SDL3
         run: |
           git clone -q --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git build/SDL
@@ -61,7 +63,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/build/sdl3" \
-            -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
             -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_VULKAN=OFF -DSDL_OPENGL=OFF -DSDL_OPENGLES=ON
           cmake --build build/SDL/build
           cmake --install build/SDL/build
