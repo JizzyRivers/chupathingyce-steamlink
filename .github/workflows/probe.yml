@@ -1,0 +1,77 @@
+# Builds the probe (probe/) for the Steam Link with Valve's SDK: SDL3 at
+# chupathingyce's pin, cross-compiled with the SDK's toolchain against its
+# root filesystem, then the probe linked to it and packed as a Steam Link
+# app. The artifact's steamlink folder goes on a USB drive.
+name: Probe
+
+on:
+  push:
+    branches: [main]
+    paths: ["probe/**", "art/**", ".github/workflows/probe.yml"]
+  workflow_dispatch:
+
+env:
+  # Valve's steamlink-sdk, master on 2025-03-17
+  STEAMLINK_SDK_COMMIT: 62b4d098d1472c3534dd098ca2a0e0e10712f1c6
+  # chupathingyce's pin (tools/android_build.py: SDL_TAG, SDL_COMMIT)
+  SDL_TAG: release-3.4.16
+  SDL_COMMIT: fa2c02bb6e21974a89ea9824bc53c9932abe5f9c
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build file
+
+      - uses: actions/cache@v4
+        id: sdk
+        with:
+          path: steamlink-sdk
+          key: steamlink-sdk-${{ env.STEAMLINK_SDK_COMMIT }}
+
+      # only the toolchain and the root filesystem: the SDK is 3 GB whole
+      - name: Fetch the Steam Link SDK
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          git init -q steamlink-sdk
+          cd steamlink-sdk
+          git remote add origin https://github.com/ValveSoftware/steamlink-sdk.git
+          git sparse-checkout set toolchain rootfs
+          git fetch -q --depth 1 --filter=blob:none origin "$STEAMLINK_SDK_COMMIT"
+          git checkout -q FETCH_HEAD
+
+      - name: Check the toolchain
+        run: |
+          source steamlink-sdk/setenv.sh
+          file "$(command -v armv7a-cros-linux-gnueabi-gcc)"
+          armv7a-cros-linux-gnueabi-gcc --version | head -1
+          ls steamlink-sdk/rootfs/usr/lib | grep -iE 'egl|gles|sdl' || true
+
+      - name: Build SDL3
+        run: |
+          git clone -q --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git build/SDL
+          test "$(git -C build/SDL rev-parse HEAD)" = "$SDL_COMMIT"
+          export MARVELL_SDK_PATH=$PWD/steamlink-sdk
+          source steamlink-sdk/setenv.sh
+          cmake -S build/SDL -B build/SDL/build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/sdl3" \
+            -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_VULKAN=OFF -DSDL_OPENGL=OFF -DSDL_OPENGLES=ON
+          cmake --build build/SDL/build
+          cmake --install build/SDL/build
+          grep -E 'SDL_VIDEO_DRIVER_[A-Z]+ ' build/SDL/build/include-config-release/build_config/SDL_build_config.h || true
+
+      - name: Build the probe
+        run: bash probe/build_steamlink.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steamlink-probe
+          path: steamlink/
+          retention-days: 30

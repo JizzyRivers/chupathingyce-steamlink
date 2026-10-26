@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# the steam link sdk, sdl3 and the builds (.github/workflows/probe.yml, or ur own checkout)
+steamlink-sdk/
+build/
+steamlink/
