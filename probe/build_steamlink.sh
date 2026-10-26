@@ -18,12 +18,14 @@ set -u
 
 OUT="${ROOT}/build/probe"
 mkdir -p "${OUT}"
-# SDL3 static, so the app is the one file; CC is the sdk's compiler and its
-# flags, split on purpose
+# SDL3 static, so the app is the one file, and what SDL3 links in turn
+# (pulseaudio, its libraries off the box) from its sdl3.pc. no sysroot for
+# that one: SDL3's prefix isn't in the sdk's root filesystem
+SDL3_LIBS=$(PKG_CONFIG_SYSROOT_DIR="" PKG_CONFIG_LIBDIR="${SDL3_PREFIX}/lib/pkgconfig" pkg-config --static --libs sdl3)
+# CC is the sdk's compiler and its flags, split on purpose
 # shellcheck disable=SC2086
 ${CC} -std=gnu11 -O2 -Wall -marm -mfloat-abi=hard -mfpu=neon \
-	-I"${SDL3_PREFIX}/include" "${TOP}/probe.c" -o "${OUT}/probe" \
-	-L"${SDL3_PREFIX}/lib" -Wl,-Bstatic -lSDL3 -Wl,-Bdynamic -lm -ldl -lpthread -lrt
+	-I"${SDL3_PREFIX}/include" "${TOP}/probe.c" -o "${OUT}/probe" ${SDL3_LIBS}
 ${STRIP} "${OUT}/probe"
 
 APP="${ROOT}/steamlink/apps/chupathingyce-probe"
