@@ -37,8 +37,12 @@ from tools.linux_build import Linux32Units, _load_port_config, compile_launcher,
 # multiply-add), hard float as the sdk's glibc is
 STEAMLINK_TRIPLE = "armv7a-linux-gnueabihf"
 STEAMLINK_INSTRUCTION_SET = ["-march=armv7-a", "-mfpu=neon", "-mfloat-abi=hard"]
-# the game's char is MSVC's, signed (ARM's is unsigned): as the arm64 server
-STEAMLINK_ABI_FLAGS = ["-fsigned-char", "-DHALO_STEAMLINK"]
+# the game's char is MSVC's, signed (ARM's is unsigned): as the arm64 server.
+# No VFP registers for what is not floating point: clang copies a structure
+# of floats with vldr, which faults on the 2-byte aligned ones in a map's
+# animation data, where an integer load is fixed up (the box's kernel fixes
+# ldm and ldrd, /proc/cpu/alignment, and ldr needs none)
+STEAMLINK_ABI_FLAGS = ["-fsigned-char", "-mno-implicit-float", "-DHALO_STEAMLINK"]
 # the box's 256 MB (about 200 free): the Xbox's texture cache (22 MB, not the
 # desktop's 256) and its structure surfaces and dynamic triangles a frame,
 # as the Xbox 360's port has them (port/linux/include/halo_port_capacity.h)
@@ -48,7 +52,10 @@ STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
                           "-DHALO_CONSOLE_GLES2",
                           # the box's sound, through the firmware's SDL2
                           # (src/steamlink_audio.c)
-                          "-DHALO_CONSOLE_AUDIO_OUTPUT"]
+                          "-DHALO_CONSOLE_AUDIO_OUTPUT",
+                          # the high-res HUD decoded as it is drawn: 40 MB
+                          # less in a level
+                          "-DHALO_CONSOLE_HUD_ON_DEMAND"]
 # the port's own platform units
 STEAMLINK_SOURCES = ["src/gles2_layer.c", "src/steamlink_audio.c"]
 # the sdk's gcc, for its crt files and libgcc (clang finds glibc in the root

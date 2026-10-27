@@ -718,6 +718,8 @@ the draw reads. No buffer object reaches the driver. */
 struct layer_buffer
 {
 	unsigned char *data;
+	/* the data is someone else's memory (console_gl_buffer_alias) */
+	int aliased;
 	/* -1 for a name made with nothing in it yet */
 	GLsizeiptr size;
 };
@@ -772,8 +774,10 @@ static void GL_APIENTRY layer_DeleteBuffers(GLsizei count, const GLuint *names)
 
 		if (!buffer)
 			continue;
-		free(buffer->data);
+		if (!buffer->aliased)
+			free(buffer->data);
 		buffer->data = NULL;
+		buffer->aliased = 0;
 		buffer->size = 0;
 		if (names[index] < buffer_next)
 			buffer_next = names[index];
@@ -821,7 +825,25 @@ static void GL_APIENTRY layer_BufferSubData(GLenum target, GLintptr offset, GLsi
 
 	if (!buffer || !buffer->data || offset < 0 || size < 0 || offset + size > buffer->size)
 		return;
-	memcpy(buffer->data + offset, data, (size_t)size);
+	/* (an aliased buffer's upload from its own memory: already there) */
+	if (buffer->data + offset != data)
+		memcpy(buffer->data + offset, data, (size_t)size);
+}
+
+/* HALO_CONSOLE_GLES2's (d3d8_gl.c's mirror of the Xbox window): the buffer
+bound to target is that memory itself, as client arrays read it */
+void console_gl_buffer_alias(GLenum target, void *memory, unsigned long size)
+{
+	GLuint *binding = buffer_binding(target);
+	struct layer_buffer *buffer = binding ? buffer_get(*binding) : NULL;
+
+	if (!buffer)
+		return;
+	if (!buffer->aliased)
+		free(buffer->data);
+	buffer->data = memory;
+	buffer->size = (GLsizeiptr)size;
+	buffer->aliased = 1;
 }
 
 /* ---------- vertex arrays */
@@ -1280,6 +1302,9 @@ static int draw_degenerate(GLint first_vertex, GLsizei count, GLenum type, const
 	return 1;
 }
 
+static int program_skipped(GLuint program);
+static void skin_log(GLsizei count, GLenum type, const void *indices);
+
 /* HALO_GLES2_EXPERIMENT=program:bits, for one program's draws while
 hunting a GPU hang: 1, its textures a white 1x1; 2, only the attributes the
 program reads enabled; 4, not drawn at all. experiment_begin returns what to
@@ -1515,7 +1540,7 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 		unsigned int feedback = feedback_begin();
 		unsigned int experiment = experiment_begin();
 
-		if (!(experiment & 4) && !draw_degenerate(first, count, 0, NULL))
+		if (!(experiment & 4) && !draw_degenerate(first, count, 0, NULL) && !program_skipped(program_current))
 		{
 			unsigned int shared = shared_units_begin();
 
@@ -1547,12 +1572,13 @@ static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum ty
 		trace("draw elements mode %u count %d type 0x%x program %u", (unsigned)mode, (int)count, (unsigned)type,
 			program_current);
 	indices = buffer_pointer(vertex_array()->element_buffer, indices);
+	skin_log(count, type, indices);
 	if (indices)
 	{
 		unsigned int feedback = feedback_begin();
 		unsigned int experiment = experiment_begin();
 
-		if (!(experiment & 4) && !draw_degenerate(0, count, type, indices))
+		if (!(experiment & 4) && !draw_degenerate(0, count, type, indices) && !program_skipped(program_current))
 		{
 			unsigned int shared = shared_units_begin();
 
@@ -1709,7 +1735,14 @@ static void screenshot_maybe(GLint x, GLint y, GLsizei width, GLsizei height)
 	FILE *file;
 	GLsizei row;
 
-	if (!folder || width <= 0 || height <= 0 || ++frames % 300)
+	/* (HALO_GLES2_SHOT_EVERY: another number of frames) */
+	static long every = -1;
+
+	if (every < 0)
+		every = getenv("HALO_GLES2_SHOT_EVERY") ? atol(getenv("HALO_GLES2_SHOT_EVERY")) : 300;
+	if (every <= 0)
+		every = 300;
+	if (!folder || width <= 0 || height <= 0 || ++frames % (unsigned long)every)
 		return;
 	pixels = malloc((size_t)width * (size_t)height * 4);
 	if (!pixels)
@@ -1912,8 +1945,19 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 
 		if (profiling)
 			profile_report();
+		static Uint64 period_start;
+
 		if (timed++ < 30)
 			platform_log("gles2: frame %d presented, %llu ms after the last", timed, (unsigned long long)(now - last));
+		/* and every 300 frames after, their average */
+		if (timed == 30)
+			period_start = now;
+		else if (timed > 30 && !((timed - 30) % 300))
+		{
+			platform_log("gles2: frames %d to %d took %.1f ms each", timed - 300, timed,
+				(double)(now - period_start) / 300.0);
+			period_start = now;
+		}
 		last = now;
 		screenshot_maybe(destination_x0 < destination_x1 ? destination_x0 : destination_x1,
 			destination_y0 < destination_y1 ? destination_y0 : destination_y1, abs(destination_x1 - destination_x0),
@@ -2015,6 +2059,29 @@ struct layer_shader
 static struct layer_shader shaders[LAYER_TRACKED];
 /* the vertex shader each program has */
 static GLuint program_vertex_shaders[LAYER_TRACKED];
+
+/* whether a program's vertex shader reads relative constants, c[a0 + n] */
+static int program_relative(GLuint program)
+{
+	GLuint vertex = program && program < LAYER_TRACKED ? program_vertex_shaders[program] : 0;
+
+	return vertex && shaders[vertex].source && strstr(shaders[vertex].source, "(a0 +") != NULL;
+}
+
+/* HALO_GLES2_SKIP_RELATIVE: the draws whose vertex shader reads relative
+constants (c[a0 + n], the skinned models) left out, to tell what they draw */
+static int program_skipped(GLuint program)
+{
+	static int skip = -1;
+	GLuint vertex;
+
+	if (skip < 0)
+		skip = getenv("HALO_GLES2_SKIP_RELATIVE") != NULL;
+	if (!skip || !program || program >= LAYER_TRACKED)
+		return 0;
+	vertex = program_vertex_shaders[program];
+	return vertex && shaders[vertex].source && strstr(shaders[vertex].source, "(a0 +");
+}
 static GLuint program_fragment_shaders[LAYER_TRACKED];
 
 struct text
@@ -2151,6 +2218,21 @@ all (its built-in functions cannot be overloaded: clamp is float's only) */
 static const char *const text_replacements[] = {
 	/* the vertex shader's relative constants, c[clamp(a0 + n, 0, 191)] */
 	"[clamp(a0", "[clamp_int(a0",
+	/* c[], the Xbox's 192 vertex constants, as 128: an array read with a
+	relative index must fit the box's 168 vectors with the shader's other
+	uniforms and the literals its compiler keeps there, or Vivante's compiler
+	gives it half its size and the rest read 0 (a skinned model's nodes past
+	the eighth); 164 does not link with the larger shaders. 128 holds 22
+	nodes from c[60]. The shaders name none past c[59] themselves; the
+	renderer's uploads past c[127] are dropped */
+	"uniform vec4 c[192];", "uniform vec4 c[128];",
+	", 0, 191)]", ", 0, 127)]",
+	/* the pixel shader's exact texel of stage 0's texture (nv2a_psh.c: a
+	threshold read where the stage samples), which ES 1.00 has neither
+	textureSize nor texelFetch for: the same place, sampled */
+	"ivec2 size = textureSize(tex0, 0);", "",
+	"ivec2 pixel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);", "",
+	"texelFetch(tex0, pixel, 0)", "texture2D(tex0, uv)",
 	NULL,
 };
 
@@ -2193,6 +2275,348 @@ static int word_count(const char *text, const char *word)
 		at += length;
 	}
 	return count;
+}
+
+/* The vertex shader's instructions, as nv2a_vsh.c writes them, copy each
+operand into A, B and C and compute mac from them:
+
+	A = v6.xxxx;
+	B = c[clamp_int(a0 + 60, 0, 191)].xyzw;
+	C = v6.xyzw;
+	mac = A * B;
+	r3.xyzw = mac.xyzw;
+
+Vivante's compiler keeps the copies, and a skinned model's shader (its
+relative constants, c[a0 + n], more than once) then fails to link. Folded,
+each instruction computes from its operands into a temporary of its own:
+
+	vec4 m2 = (v6.xxxx) * (c[clamp_int(a0 + 60, 0, 191)].xyzw);
+	r3.xyzw = m2.xyzw;
+
+An instruction of any other shape (the special function unit's, ilu) is
+left as it was. */
+
+/* "\tTARGET = EXPRESSION;": TARGET and EXPRESSION, or 0 */
+static int assignment_parse(const char *line, size_t length, char *target, size_t target_size, const char **expression,
+	size_t *expression_length)
+{
+	const char *equals;
+	size_t name;
+
+	if (length < 6 || line[0] != '\t' || line[1] == '\t' || line[length - 1] != ';')
+		return 0;
+	equals = strstr(line, " = ");
+	if (!equals || equals >= line + length)
+		return 0;
+	name = (size_t)(equals - (line + 1));
+	if (!name || name >= target_size)
+		return 0;
+	memcpy(target, line + 1, name);
+	target[name] = 0;
+	*expression = equals + 3;
+	*expression_length = (size_t)(line + length - 1 - *expression);
+	return 1;
+}
+
+static int is_block_start(const char *line, size_t length)
+{
+	return length > 6 && line[0] == '\t' && line[1] == '/' && line[2] == '*' && line[3] == ' ' && line[4] >= '0' &&
+		line[4] <= '9' && line[length - 2] == '*' && line[length - 1] == '/';
+}
+
+/* the text with the whole words of a pair replaced (pairs: word, then
+replacement, NULL-ended) */
+static void words_into(struct text *text, const char *source, size_t length, const char *const *pairs)
+{
+	replace_words(text, source, length, pairs);
+}
+
+static int mentions_word(const char *text, size_t length, const char *word)
+{
+	size_t size = strlen(word), index;
+
+	for (index = 0; index + size <= length; index++)
+	{
+		if (!strncmp(text + index, word, size) && (!index || !is_name_character(text[index - 1])) &&
+			(index + size == length || !is_name_character(text[index + size])))
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void operands_fold(struct text *source)
+{
+	struct text result = { 0 };
+	const char *line = source->buffer;
+	int folded = 0;
+
+	while (line && *line)
+	{
+		const char *end = strchr(line, '\n');
+		size_t length = end ? (size_t)(end - line) : strlen(line);
+
+		if (is_block_start(line, length))
+		{
+			/* the block's lines, to the next block or the first that is not an
+			assignment */
+			const char *block = line, *cursor = end ? end + 1 : line + length;
+			char operands[3][160];
+			int have[3] = { 0, 0, 0 }, simple = 1, writes = 0;
+			const char *mac = NULL, *write_lines[8];
+			size_t mac_length = 0, write_lengths[8];
+			const char *block_end;
+
+			while (*cursor)
+			{
+				const char *next = strchr(cursor, '\n');
+				size_t size = next ? (size_t)(next - cursor) : strlen(cursor);
+				char target[64];
+				const char *expression;
+				size_t expression_length;
+
+				if (is_block_start(cursor, size))
+					break;
+				if (!assignment_parse(cursor, size, target, sizeof(target), &expression, &expression_length))
+				{
+					/* (a line of another shape that reads what the block
+					computed, an if's write: the block stays as it was) */
+					if (mentions_word(cursor, size, "mac") || mentions_word(cursor, size, "ilu") ||
+						mentions_word(cursor, size, "A") || mentions_word(cursor, size, "B") ||
+						mentions_word(cursor, size, "C"))
+					{
+						simple = 0;
+					}
+					break;
+				}
+				if (!mac && (!strcmp(target, "A") || !strcmp(target, "B") || !strcmp(target, "C")) &&
+					expression_length < sizeof(operands[0]))
+				{
+					int which = target[0] - 'A';
+
+					memcpy(operands[which], expression, expression_length);
+					operands[which][expression_length] = 0;
+					have[which] = 1;
+				}
+				else if (!mac && !strcmp(target, "mac"))
+				{
+					mac = expression;
+					mac_length = expression_length;
+					if (mentions_word(mac, mac_length, "ilu"))
+						simple = 0;
+				}
+				else if (mac && writes < 8 && mentions_word(expression, expression_length, "mac") &&
+					!mentions_word(expression, expression_length, "A") &&
+					!mentions_word(expression, expression_length, "B") &&
+					!mentions_word(expression, expression_length, "C") &&
+					!mentions_word(expression, expression_length, "ilu"))
+				{
+					write_lines[writes] = cursor;
+					write_lengths[writes++] = size;
+				}
+				else
+				{
+					simple = 0;
+					break;
+				}
+				cursor = next ? next + 1 : cursor + size;
+			}
+			block_end = cursor;
+			if (simple && mac && writes)
+			{
+				char wrapped[3][168];
+				const char *pairs[7];
+				int index, count = 0;
+
+				for (index = 0; index < 3; index++)
+				{
+					if (!have[index])
+						continue;
+					snprintf(wrapped[index], sizeof(wrapped[index]), "(%s)", operands[index]);
+					pairs[count * 2] = index == 0 ? "A" : index == 1 ? "B" : "C";
+					pairs[count * 2 + 1] = wrapped[index];
+					count++;
+				}
+				pairs[count * 2] = NULL;
+				char name[16];
+				const char *to_name[3];
+
+				/* (a name of its own for each, in the function's scope: Vivante's
+				compiler draws wrong with a scope per instruction, each with its
+				own m) */
+				snprintf(name, sizeof(name), "m%d", folded++);
+				to_name[0] = "mac";
+				to_name[1] = name;
+				to_name[2] = NULL;
+				text_append(&result, block, length);
+				text_add(&result, "\n\tvec4 ");
+				text_add(&result, name);
+				text_add(&result, " = ");
+				words_into(&result, mac, mac_length, pairs);
+				text_add(&result, ";\n");
+				for (index = 0; index < writes; index++)
+				{
+					words_into(&result, write_lines[index], write_lengths[index], to_name);
+					text_add(&result, "\n");
+				}
+			}
+			else
+			{
+				/* as it was, to where the block's assignments stopped */
+				text_append(&result, block, (size_t)(block_end - block));
+			}
+			line = block_end;
+			continue;
+		}
+		text_append(&result, line, length + (end ? 1 : 0));
+		line = end ? end + 1 : line + length;
+	}
+	free(source->buffer);
+	*source = result;
+}
+
+/* The vertex shaders' constants, c[], are the Xbox's 192, and the box has
+168 vectors for a shader's uniforms and the literals its compiler keeps
+there. A shader names a few outright (c[0] to c[22], c[58], c[59], the
+odd one past c[180]); Vivante's compiler keeps an array up to the highest
+of them, or whole where it is read with a relative index, and links
+nothing that holds more than the box has. So each constant a shader names
+is a uniform of its own (c_7), and only a skinned model's shader (relative
+constants, c[a0 + n]) has an array: its nodes' matrices, three a node from
+c[60], as c_bones[108] (36 nodes, to c[167]; 132, to c[191], does not
+link with the larger shaders), which its relative reads index and which
+holds whatever of c[60] to c[167] it names too. layer_Uniform4fv sends the
+renderer's uploads of c[] where they now go. */
+#define BONES_FIRST 60
+#define BONES_COUNT 108
+
+static void constants_split(struct text *source, int relative)
+{
+	struct text result = { 0 }, declarations = { 0 };
+	unsigned char named[192];
+	const char *at = source->buffer, *declaration;
+	int index;
+
+	memset(named, 0, sizeof(named));
+	while (at && *at)
+	{
+		const char *found = strstr(at, "c[");
+		char *end;
+		long number;
+
+		if (!found)
+		{
+			text_add(&result, at);
+			break;
+		}
+		text_append(&result, at, (size_t)(found - at));
+		if ((found != source->buffer && is_name_character(found[-1])) ||
+			(found - source->buffer >= 5 && !strncmp(found - 5, "vec4 ", 5)))
+		{
+			text_append(&result, found, 2);
+			at = found + 2;
+			continue;
+		}
+		if (relative && !strncmp(found, "c[clamp_int(a0 + ", 17))
+		{
+			/* c[clamp_int(a0 + K, 0, 127)]: the block, from K - 60 */
+			long offset = strtol(found + 17, &end, 10);
+			const char *close = strstr(end, ")]");
+			char text[96];
+
+			if (!close)
+			{
+				text_append(&result, found, 2);
+				at = found + 2;
+				continue;
+			}
+			snprintf(text, sizeof(text), "c_bones[clamp_int(a0 + %ld, 0, %d)]", offset - BONES_FIRST, BONES_COUNT - 1);
+			text_add(&result, text);
+			at = close + 2;
+			continue;
+		}
+		number = strtol(found + 2, &end, 10);
+		if (end != found + 2 && *end == ']' && number >= 0 && number < 192)
+		{
+			char text[32];
+
+			if (relative && number >= BONES_FIRST && number - BONES_FIRST < BONES_COUNT)
+			{
+				snprintf(text, sizeof(text), "c_bones[%ld]", number - BONES_FIRST);
+			}
+			else
+			{
+				snprintf(text, sizeof(text), "c_%ld", number);
+				named[number] = 1;
+			}
+			text_add(&result, text);
+			at = end + 1;
+			continue;
+		}
+		text_append(&result, found, 2);
+		at = found + 2;
+	}
+	/* c[]'s declaration as theirs */
+	for (index = 0; index < 192; index++)
+	{
+		if (named[index])
+		{
+			char text[40];
+
+			snprintf(text, sizeof(text), "uniform vec4 c_%d;\n", index);
+			text_add(&declarations, text);
+		}
+	}
+	if (relative)
+	{
+		char text[48];
+
+		snprintf(text, sizeof(text), "uniform vec4 c_bones[%d];\n", BONES_COUNT);
+		text_add(&declarations, text);
+	}
+	declaration = result.buffer ? strstr(result.buffer, "uniform vec4 c[128];\n") : NULL;
+	if (declaration)
+	{
+		struct text final = { 0 };
+		size_t before = (size_t)(declaration - result.buffer);
+
+		text_append(&final, result.buffer, before);
+		if (declarations.buffer)
+			text_add(&final, declarations.buffer);
+		text_add(&final, declaration + strlen("uniform vec4 c[128];\n"));
+		free(result.buffer);
+		result = final;
+	}
+	free(declarations.buffer);
+	free(source->buffer);
+	*source = result;
+}
+
+/* A vertex shader that reads relative constants (c[a0 + n]: a skinned
+model's bones, three to a node from c[60]) has its c[] sized by Vivante's
+compiler to the highest constant it names outright, so the nodes past it
+would read 0 and their vertices fall to a point. Naming the last, c[127],
+where it is never taken keeps the whole array (text_replacements sizes it
+to fit). */
+static void constants_keep(struct text *source)
+{
+	const char *end;
+	size_t at;
+	struct text kept = { 0 };
+
+	if (!source->buffer || !strstr(source->buffer, "(a0 +"))
+		return;
+	end = strrchr(source->buffer, '}');
+	if (!end)
+		return;
+	at = (size_t)(end - source->buffer);
+	text_append(&kept, source->buffer, at);
+	/* (as c[] is written then: constants_split makes it c_bones[107]) */
+	text_add(&kept, "\tif (point_size < -1.0e30) gl_Position = c[167];\n");
+	text_add(&kept, end);
+	free(source->buffer);
+	*source = kept;
 }
 
 /* The vertex shader declares the Xbox's 16 registers (vN_in, or vN_packed)
@@ -2382,7 +2806,20 @@ static char *shader_translate(struct layer_shader *shader, const char *source)
 		replace_text(&result, body.buffer, text_replacements);
 	free(body.buffer);
 	if (!fragment && result.buffer)
+	{
+		/* (HALO_GLES2_NO_FOLD: as written, to compare) */
+		if (!getenv("HALO_GLES2_NO_FOLD"))
+			operands_fold(&result);
+		if (result.buffer)
+		{
+			int relative = strstr(result.buffer, "(a0 +") != NULL;
+
+			if (relative)
+				constants_keep(&result);
+			constants_split(&result, relative);
+		}
 		attributes_prune(shader, &result);
+	}
 	return result.buffer;
 }
 
@@ -2438,6 +2875,21 @@ static void GL_APIENTRY layer_CompileShader(GLuint shader)
 	static int reported;
 	GLint compiled = 0;
 
+	/* (HALO_GLES2_DUMP_ALL=folder: every shader as the driver gets it) */
+	if (getenv("HALO_GLES2_DUMP_ALL") && shader < LAYER_TRACKED && shaders[shader].source)
+	{
+		char path[512];
+		FILE *file;
+
+		snprintf(path, sizeof(path), "%s/shader%u.%s", getenv("HALO_GLES2_DUMP_ALL"), shader,
+			shaders[shader].type == GL_VERTEX_SHADER ? "vert" : "frag");
+		file = fopen(path, "w");
+		if (file)
+		{
+			fputs(shaders[shader].source, file);
+			fclose(file);
+		}
+	}
 	real.CompileShader(shader);
 	halo_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
 	if (!compiled && reported < 6 && shader < LAYER_TRACKED && shaders[shader].source)
@@ -2498,6 +2950,10 @@ static void program_dump(GLuint program, const char *tag)
 	}
 }
 
+/* (each program's c[], layer_GetUniformLocation's) */
+struct constant_split;
+static struct constant_split *constant_split[LAYER_TRACKED];
+
 static void GL_APIENTRY layer_LinkProgram(GLuint program)
 {
 	static int reported;
@@ -2522,6 +2978,12 @@ static void GL_APIENTRY layer_LinkProgram(GLuint program)
 	}
 	real.LinkProgram(program);
 	halo_glGetProgramiv(program, GL_LINK_STATUS, &linked);
+	/* (a name used again is another program: its c[] is looked up anew) */
+	if (program < LAYER_TRACKED)
+	{
+		free(constant_split[program]);
+		constant_split[program] = NULL;
+	}
 	if (!linked && reported < 6)
 	{
 		char log[1024] = "";
@@ -2552,6 +3014,159 @@ static void GL_APIENTRY layer_LinkProgram(GLuint program)
 			}
 		}
 		platform_log("gles2: a program does not link: %s", log);
+	}
+}
+
+/* (the driver's own, which layer_GetUniformLocation and layer_Uniform4fv
+stand in front of for c[]) */
+static __typeof__(halo_glGetUniformLocation) real_GetUniformLocation;
+static __typeof__(halo_glUniform4fv) real_Uniform4fv;
+
+/* c[]'s location as the renderer is given it: one no uniform has, so that
+its uploads to c + k (d3d8_gl.c, k to 191) reach layer_Uniform4fv, which
+sends each to where constants_split put that constant */
+#define CONSTANTS_VIRTUAL_LOCATION 0x100000
+
+/* a program's c[]: where each constant it names went (-1 none), and its
+nodes' block (c_bones, c[60] on; -1 none) */
+struct constant_split
+{
+	GLint named[192];
+	GLint bones;
+};
+
+static GLint GL_APIENTRY layer_GetUniformLocation(GLuint program, const GLchar *name)
+{
+	struct constant_split *split;
+	int index, any;
+
+	/* c[N], as the renderer probes c[]'s length after asking for c: the
+virtual location's Nth, all 192 (its uploads go where each is) */
+	if (program < LAYER_TRACKED && !strncmp(name, "c[", 2) && constant_split[program])
+	{
+		char *end;
+		long index = strtol(name + 2, &end, 10);
+
+		if (*end == ']' && index >= 0 && index < 192)
+			return CONSTANTS_VIRTUAL_LOCATION + (GLint)index;
+	}
+	if (program >= LAYER_TRACKED || strcmp(name, "c"))
+		return real_GetUniformLocation(program, name);
+	if (!constant_split[program])
+		constant_split[program] = malloc(sizeof(struct constant_split));
+	split = constant_split[program];
+	if (!split)
+		return -1;
+	split->bones = real_GetUniformLocation(program, "c_bones");
+	any = split->bones >= 0;
+	for (index = 0; index < 192; index++)
+	{
+		char named[16];
+
+		snprintf(named, sizeof(named), "c_%d", index);
+		split->named[index] = real_GetUniformLocation(program, named);
+		any |= split->named[index] >= 0;
+	}
+	if (getenv("HALO_GLES2_CONSTANT_LOG"))
+	{
+		static int logged;
+
+		if (logged++ < 8)
+			platform_log("gles2 constants: program %u: c_0 %d, c_58 %d, bones %d, %s", program, split->named[0],
+				split->named[58], split->bones, any ? "split" : "none");
+	}
+	return any ? CONSTANTS_VIRTUAL_LOCATION : -1;
+}
+
+static void GL_APIENTRY layer_Uniform4fv(GLint location, GLsizei count, const GLfloat *values)
+{
+	struct constant_split *split;
+	GLint first, index;
+
+	if (location < CONSTANTS_VIRTUAL_LOCATION || location >= CONSTANTS_VIRTUAL_LOCATION + 192)
+	{
+		real_Uniform4fv(location, count, values);
+		return;
+	}
+	split = program_current < LAYER_TRACKED ? constant_split[program_current] : NULL;
+	if (getenv("HALO_GLES2_CONSTANT_LOG"))
+	{
+		static int logged;
+
+		if (logged++ < 12)
+			platform_log("gles2 constants: upload to program %u c[%d], %d of them (%g %g %g %g): %s", program_current,
+				location - CONSTANTS_VIRTUAL_LOCATION, (int)count, values[0], values[1], values[2], values[3],
+				split ? "split" : "no table");
+	}
+	if (!split)
+		return;
+	first = location - CONSTANTS_VIRTUAL_LOCATION;
+	if (count > 192 - first)
+		count = 192 - first;
+	/* the block's, together */
+	if (split->bones >= 0 && first + count > BONES_FIRST && first < BONES_FIRST + BONES_COUNT)
+	{
+		GLint from = first > BONES_FIRST ? first : BONES_FIRST;
+		GLint to = first + count < BONES_FIRST + BONES_COUNT ? first + count : BONES_FIRST + BONES_COUNT;
+
+		real_Uniform4fv(split->bones + (from - BONES_FIRST), to - from, values + (from - first) * 4);
+	}
+	/* and each named one */
+	for (index = first; index < first + count; index++)
+	{
+		if (split->named[index] >= 0)
+			real_Uniform4fv(split->named[index], 1, values + (index - first) * 4);
+	}
+}
+
+/* HALO_GLES2_SKIN_LOG: the first skinned draws' attributes (their formats
+and the first vertex), and the constants their nodes pick */
+static void skin_log(GLsizei count, GLenum type, const void *indices)
+{
+	static int logged = -1;
+	static void (GL_APIENTRY *get_uniform)(GLuint, GLint, GLfloat *);
+	const struct layer_vertex_array *current = vertex_array();
+	GLuint index;
+	unsigned int first;
+
+	if (logged < 0)
+		logged = getenv("HALO_GLES2_SKIN_LOG") ? 0 : 1000;
+	if (logged >= 6 || !program_relative(program_current) || !indices)
+		return;
+	logged++;
+	first = type == GL_UNSIGNED_SHORT ? ((const GLushort *)indices)[0] : ((const GLuint *)indices)[0];
+	platform_log("gles2 skin: program %u, %d indices, the first %u", program_current, (int)count, first);
+	for (index = 0; index < (GLuint)attribute_maximum; index++)
+	{
+		const struct layer_attribute *attribute = &current->attributes[index];
+		const unsigned char *data = buffer_pointer(attribute->buffer, attribute->pointer);
+		char bytes[64];
+		size_t length = 0, byte;
+
+		if (!(current->enabled & (1u << index)) || !data)
+			continue;
+		data += (size_t)first * (size_t)attribute->stride;
+		for (byte = 0; byte < 12 && length + 4 < sizeof(bytes); byte++)
+			length += (size_t)snprintf(bytes + length, sizeof(bytes) - length, "%02x", data[byte]);
+		platform_log("gles2 skin:   attribute %u: %d x 0x%x%s, stride %d, offset %lu, bytes %s", index,
+			(int)attribute->size, (unsigned)attribute->type, attribute->normalized ? " normalized" : "",
+			(int)attribute->stride, (unsigned long)(uintptr_t)attribute->pointer, bytes);
+	}
+	if (!get_uniform)
+		get_uniform = (__typeof__(get_uniform))SDL_GL_GetProcAddress("glGetUniformfv");
+	{
+		static const int wanted[] = { 7, 60, 61, 62, 167, 168, 190, 191 };
+		unsigned k;
+
+		for (k = 0; get_uniform && k < sizeof(wanted) / sizeof(*wanted); k++)
+		{
+			GLfloat value[4] = { 0 };
+			char name[16];
+
+			snprintf(name, sizeof(name), "c[%d]", wanted[k]);
+			get_uniform(program_current, real_GetUniformLocation(program_current, name), value);
+			platform_log("gles2 skin:   c[%d] %g %g %g %g", wanted[k], value[0], value[1], value[2], value[3]);
+		}
 	}
 }
 
@@ -2692,6 +3307,33 @@ static void *profile_thread(void *unused)
 	return NULL;
 }
 
+/* a bus error (a misaligned access the CPU will not do: VFP loads, ldrd):
+where, in the log, before the signal goes on as it would have (the game's
+crash handler takes SIGSEGV only) */
+static void bus_error(int signal_number, siginfo_t *information, void *context)
+{
+	ucontext_t *ucontext = context;
+	char line[160];
+	int length;
+
+	length = snprintf(line, sizeof(line), "gles2: bus error at %p, pc %08lx lr %08lx\n", information->si_addr,
+		(unsigned long)ucontext->uc_mcontext.arm_pc, (unsigned long)ucontext->uc_mcontext.arm_lr);
+	if (write(STDERR_FILENO, line, (size_t)length) < 0)
+		length = 0;
+	signal(signal_number, SIG_DFL);
+	raise(signal_number);
+}
+
+static void bus_error_watch(void)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = bus_error;
+	action.sa_flags = SA_SIGINFO;
+	sigaction(SIGBUS, &action, NULL);
+}
+
 static void profile_start(void)
 {
 	pthread_t thread;
@@ -2820,6 +3462,10 @@ int console_gles2_layer(void)
 	LAYER_REPLACE(AttachShader);
 	LAYER_REPLACE(LinkProgram);
 	LAYER_REPLACE(UseProgram);
+	real_GetUniformLocation = halo_glGetUniformLocation;
+	real_Uniform4fv = halo_glUniform4fv;
+	LAYER_REPLACE(GetUniformLocation);
+	LAYER_REPLACE(Uniform4fv);
 	LAYER_REPLACE(GenQueries);
 	LAYER_REPLACE(BeginQuery);
 	LAYER_REPLACE(EndQuery);
@@ -2836,5 +3482,6 @@ int console_gles2_layer(void)
 		unit_samplers[unit] = 0;
 	platform_log("gles2: ES 2 filled out to ES 3 for the renderer (%d vertex attributes)", attribute_maximum);
 	profile_start();
+	bus_error_watch();
 	return 1;
 }
