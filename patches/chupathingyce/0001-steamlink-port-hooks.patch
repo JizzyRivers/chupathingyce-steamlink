@@ -1,5 +1,5 @@
 diff --git a/port/linux/include/halo_linux_prefix.h b/port/linux/include/halo_linux_prefix.h
-index d05919f..0ecb818 100644
+index d05919f..d52f93c 100644
 --- a/port/linux/include/halo_linux_prefix.h
 +++ b/port/linux/include/halo_linux_prefix.h
 @@ -10,8 +10,8 @@ byte-for-byte identical to what the matching MSVC build compiles.
@@ -13,6 +13,24 @@ index d05919f..0ecb818 100644
  #endif
  
  /* ---------- musl's wide characters (the static dedicated servers,
+@@ -36,6 +36,17 @@ typedef unsigned short wint_t;
+ 
+ #include "../../../source/cseries/xbox_address.h"
+ 
++/* ---------- the renderer's OpenGL ES path
++
++OpenGL ES rather than desktop OpenGL (port/linux/src/d3d8_gl.c and the
++rest of the renderer): Android's ES 3, and a console whose ES 2 the port
++fills out to the ES 3 the renderer uses (HALO_CONSOLE_GLES2, the Steam
++Link's: console_gles2_layer) */
++
++#if (defined(HALO_ANDROID) || defined(HALO_CONSOLE_GLES2)) && !defined(HALO_GL_ES)
++#define HALO_GL_ES 1
++#endif
++
+ /* ---------- XDK architecture selection (MSVC predefines these) */
+ 
+ #define _X86_ 1
 diff --git a/port/linux/include/wchar.h b/port/linux/include/wchar.h
 index 24bff14..4f800a3 100644
 --- a/port/linux/include/wchar.h
@@ -72,6 +90,686 @@ index e6cead8..f9ac423 100644
  #elif defined(__i386__) || defined(_M_IX86)
  #define BUILD_IDENTITY_ARCHITECTURE "x86"
  #else
+diff --git a/port/linux/src/d3d8_gl.c b/port/linux/src/d3d8_gl.c
+index 6eba8da..74cfc70 100644
+--- a/port/linux/src/d3d8_gl.c
++++ b/port/linux/src/d3d8_gl.c
+@@ -41,7 +41,7 @@ Conventions carried over from the Xbox:
+ void d3d8_surface_initialize(D3DSurface *surface, D3DFORMAT format, unsigned long width, unsigned long height);
+ void d3d8_surface_resize(D3DSurface *surface, D3DFORMAT format, unsigned long width, unsigned long height);
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* OpenGL ES 3 (port/android/README.md): the desktop formats, enumerants
+ and entry points used below that ES lacks */
+ #define GL_BGRA GL_RGBA
+@@ -123,7 +123,7 @@ static const struct
+ {
+ 	{ "off", _anti_aliasing_off, 0 },
+ 	{ "fxaa", _anti_aliasing_fxaa, 0 },
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* (SMAA's three passes and supersampling's four times the pixels are
+ 	more than a phone's GPU has to spare: FXAA in SMAA's place, and none) */
+ 	{ "smaa", _anti_aliasing_fxaa, 0 },
+@@ -179,7 +179,7 @@ static int anti_aliasing(void)
+ 
+ static void screen_mode_choose(long *width, float scale[2])
+ {
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* display.screen_width, or 0 for the display's shape, which the app
+ 	passes (port/android/host/host_main.c) */
+ 	const char *display = getenv("HALO_DISPLAY_WIDTH");
+@@ -357,7 +357,7 @@ struct vertex_shader_object
+ 	/* shader[] and lit_shader[] tried already (bits 0 and 1, and 2 and 3 lit):
+ 	one that failed (0) is not compiled again at each draw */
+ 	unsigned char shaders_tried;
+-#if !defined(HALO_ANDROID) && !defined(__APPLE__)
++#if !defined(HALO_GL_ES) && !defined(__APPLE__)
+ 	/* the vertex array its draws last used, and the streams they had
+ 	(setup_streams: the layout follows from the two) */
+ 	struct vertex_array_entry *vertex_array;
+@@ -473,7 +473,7 @@ static struct framebuffer_entry *framebuffers;
+ 
+ /* ---------- the device */
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* Mobile drivers (Mali) keep every orphaned copy of a buffer until the GPU
+ is done with it, so a large buffer orphaned each frame costs its size per
+ frame in flight and more. Instead each frame streams into the next of a few
+@@ -494,7 +494,7 @@ with the old one two frames later, so these stay small. */
+ #define INDEX_BUFFER_SIZE (8 * 1024 * 1024)
+ #endif
+ #define VISIBILITY_TEST_SLOTS 4096
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ #define VISIBILITY_QUERY GL_ANY_SAMPLES_PASSED
+ #define VISIBILITY_ALL_SAMPLES 1000000
+ #else
+@@ -541,7 +541,7 @@ struct gl_device
+ 
+ 	GLuint vertex_array;
+ 	GLuint stream_buffer;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	GLuint stream_buffers[STREAM_BUFFER_RING];
+ 	GLuint index_buffers[STREAM_BUFFER_RING];
+ 	unsigned long buffer_ring;
+@@ -566,7 +566,7 @@ struct gl_device
+ 	lights makes hundreds of tests. */
+ 	GLuint visibility_known[VISIBILITY_TEST_SLOTS];
+ 	BOOL visibility_unread[VISIBILITY_TEST_SLOTS];
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* with atomic counters: one counter per test, used as a ring */
+ 	GLuint visibility_counters;
+ 	unsigned long counter_next;
+@@ -669,7 +669,7 @@ compares unequal to everything). */
+ 
+ /* (each attribute pointed at on its own, glVertexAttribPointer: OpenGL ES,
+ and macOS, whose OpenGL 4.1 has no vertex attribute binding of 4.3) */
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ struct attribute_pointer
+ {
+ 	GLuint buffer;
+@@ -758,7 +758,7 @@ static struct
+ 	GLuint array_buffer;
+ 	GLuint element_array_buffer;
+ 	unsigned char attribute_enabled[XGPU_VERTEX_ATTRIBUTE_COUNT];
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ 	struct attribute_pointer attribute_pointers[XGPU_VERTEX_ATTRIBUTE_COUNT];
+ #else
+ 	GLuint vertex_array;
+@@ -810,7 +810,7 @@ static int texture_slot(GLenum target)
+ 	return target == GL_TEXTURE_CUBE_MAP ? 1 : target == GL_TEXTURE_3D ? 2 : 0;
+ }
+ 
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ static void state_texture(int unit, GLenum target, GLuint texture)
+ {
+ 	int slot = texture_slot(target);
+@@ -854,7 +854,7 @@ static void state_element_array_buffer(GLuint buffer)
+ 	}
+ }
+ 
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ /* enables the attribute, reading size elements of type from buffer: each
+ vertex is stride bytes on from the one before it, starting at
+ buffer_offset, with the attribute relative_offset bytes into it */
+@@ -981,7 +981,7 @@ static void state_attribute_value(GLuint index, const float *value)
+ {
+ 	unsigned char kind = value ? 0 : 1;
+ 
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ 	if (gl_state.attribute_enabled[index] != 0)
+ 	{
+ 		gl_state.attribute_enabled[index] = 0;
+@@ -1157,7 +1157,7 @@ GLuint xgpu_link_program(GLuint vertex_shader, GLuint fragment_shader, const cha
+ 	return program;
+ }
+ 
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ static void GLAPIENTRY gl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
+ 	GLsizei length, const GLchar *message, const void *user)
+ {
+@@ -1419,7 +1419,7 @@ static void render_target_multisample(struct xgpu_render_target *target, int sam
+ 		return;
+ 	draw = target->depth ? framebuffer_find(0, target->multisample, TRUE) :
+ 		framebuffer_find(target->multisample, 0, TRUE);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* (ES blits into no multisampled framebuffer: it is cleared instead. A
+ 	change of the setting is taken up between frames, and the frame clears
+ 	the screen's targets before it draws) */
+@@ -1536,7 +1536,7 @@ static void gl_initialize(void)
+ 
+ 	glGetIntegerv(GL_MAJOR_VERSION, &major);
+ 	glGetIntegerv(GL_MINOR_VERSION, &minor);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	{
+ 		BOOL es32 = major > 3 || (major == 3 && minor >= 2);
+ 		const char *base_vertex_source = es32 ? "core" : "none";
+@@ -1612,7 +1612,7 @@ static void gl_initialize(void)
+ #endif
+ 	glGenVertexArrays(1, &device.vertex_array);
+ 	glBindVertexArray(device.vertex_array);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	{
+ 		int ring;
+ 
+@@ -1629,7 +1629,7 @@ static void gl_initialize(void)
+ 		device.index_buffer = device.index_buffers[0];
+ 	}
+ #endif
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	glGenBuffers(1, &device.stream_buffer);
+ 	glBindBuffer(GL_ARRAY_BUFFER, device.stream_buffer);
+ 	glBufferData(GL_ARRAY_BUFFER, STREAM_BUFFER_SIZE, NULL, GL_STREAM_DRAW);
+@@ -1639,7 +1639,7 @@ static void gl_initialize(void)
+ #endif
+ 	glGenSamplers(D3DTSS_MAXSTAGES, device.samplers);
+ 	glGenQueries(VISIBILITY_TEST_SLOTS + 1, device.queries);
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	/* (OpenGL 4.4: without it, as on macOS, visibility tests read their
+ 	queries, D3DDevice_GetVisibilityTestResult) */
+ 	if (glBufferStorage)
+@@ -1677,7 +1677,7 @@ static void gl_initialize(void)
+ 		}
+ 	}
+ #endif
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	if (xgpu_capabilities.atomic_counters)
+ 	{
+ 		int ring;
+@@ -1853,7 +1853,7 @@ HRESULT WINAPI Direct3D_CreateDevice(UINT adapter, D3DDEVTYPE device_type, void
+ 			device.presentation = *presentation_parameters;
+ 		width = device.presentation.BackBufferWidth ? device.presentation.BackBufferWidth : 640;
+ 		height = device.presentation.BackBufferHeight ? device.presentation.BackBufferHeight : 480;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		d3d8_surface_initialize(&device.back_buffer, D3DFMT_LIN_A8R8G8B8, width, height);
+ 		d3d8_surface_initialize(&device.depth_buffer, D3DFMT_LIN_D24S8, width, height);
+ #else
+@@ -2016,7 +2016,7 @@ long halo_screen_commit(void)
+ 		screen_width = width;
+ 		screen_scale[0] = scale[0];
+ 		screen_scale[1] = scale[1];
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 		if (device.created)
+ 		{
+ 			device.presentation.BackBufferWidth = (UINT)width;
+@@ -2160,7 +2160,7 @@ void WINAPI D3DDevice_BeginVisibilityTest(void)
+ 		return;
+ 	/* the query object is chosen when the test ends; use a scratch one */
+ 	device.visibility_test_active = TRUE;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	if (xgpu_capabilities.atomic_counters)
+ 	{
+ 		const GLuint zero = 0;
+@@ -2197,7 +2197,7 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+ 		return S_OK;
+ 	device.visibility_test_active = FALSE;
+ 	index %= VISIBILITY_TEST_SLOTS;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	if (xgpu_capabilities.atomic_counters)
+ 	{
+ 		unsigned long *count = &device.ring_test_count[device.buffer_ring];
+@@ -2221,7 +2221,7 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+ 	(lens flares, rasterizer_lights.c), a split-screen window's or the
+ 	screen's alike */
+ 	device.query_area[index] = target_scale[0] * target_scale[1] * (float)target_samples;
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	if (device.visibility_results)
+ 	{
+ 		/* the GPU copies the count into the slot at the next frame's end
+@@ -2245,7 +2245,7 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+ 	return S_OK;
+ }
+ 
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ /* a count of pixels in the game's pixels */
+ static GLuint visibility_unscaled(GLuint samples, DWORD index)
+ {
+@@ -2268,7 +2268,7 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
+ 			*result = 0;
+ 		return S_OK;
+ 	}
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	if (xgpu_capabilities.atomic_counters)
+ 	{
+ 		/* the latest count the GPU has finished (counter_snapshots) */
+@@ -2277,7 +2277,7 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
+ 		return S_OK;
+ 	}
+ #endif
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	if (device.visibility_results)
+ 	{
+ 		/* the latest count the GPU has written: from this test, or while
+@@ -2295,7 +2295,7 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
+ 		if (available)
+ 		{
+ 			glGetQueryObjectuiv(device.queries[index], GL_QUERY_RESULT, &samples);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 			/* ES only says whether any sample passed. The game divides the
+ 			count by the test's area (lens flare brightness,
+ 			rasterizer_lights.c): report more than any test covers, well
+@@ -2922,7 +2922,7 @@ static GLenum address_mode(DWORD mode)
+ 	{
+ 	case D3DTADDRESS_MIRROR: return GL_MIRRORED_REPEAT;
+ 	case D3DTADDRESS_CLAMP: return GL_CLAMP_TO_EDGE;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	case D3DTADDRESS_BORDER: return xgpu_capabilities.border_clamp ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE;
+ #else
+ 	case D3DTADDRESS_BORDER: return GL_CLAMP_TO_BORDER;
+@@ -2968,7 +2968,7 @@ static void sampler_parameters(GLuint sampler, const DWORD *inputs)
+ 	glSamplerParameteri(sampler, GL_TEXTURE_WRAP_S, (GLint)address_mode(inputs[3]));
+ 	glSamplerParameteri(sampler, GL_TEXTURE_WRAP_T, (GLint)address_mode(inputs[4]));
+ 	glSamplerParameteri(sampler, GL_TEXTURE_WRAP_R, (GLint)address_mode(inputs[5]));
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* ES has no sampler LOD bias; the pixel shader applies it
+ 	(texture_lod_bias) */
+ 	(void)lod_bias;
+@@ -3038,7 +3038,7 @@ static DWORD forced_anisotropy(void)
+ 
+ 		read_at = config_changes();
+ 		level = value >= 16 ? 16 : value >= 8 ? 8 : value >= 4 ? 4 : value >= 2 ? 2 : 0;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		if (!xgpu_capabilities.anisotropy)
+ 			level = 0;
+ 		else
+@@ -3121,8 +3121,8 @@ struct mip_composite
+ 
+ static struct mip_composite *mip_composites;
+ 
+-#if defined(HALO_ANDROID) || defined(__APPLE__) || defined(HALO_CONSOLE_GL_LAYER)
+-#ifdef HALO_ANDROID
++#if defined(HALO_GL_ES) || defined(__APPLE__) || defined(HALO_CONSOLE_GL_LAYER)
++#ifdef HALO_GL_ES
+ #define HOST_GL_COPY_IMAGE xgpu_capabilities.copy_image
+ #else
+ #define HOST_GL_COPY_IMAGE (glCopyImageSubData != NULL)
+@@ -3225,7 +3225,7 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+ 		composite->level_sources[level] = target->texture;
+ 		composite->level_written[level] = target->written;
+ 		render_target_resolve(target);
+-#if defined(HALO_ANDROID) || defined(__APPLE__) || defined(HALO_CONSOLE_GL_LAYER)
++#if defined(HALO_GL_ES) || defined(__APPLE__) || defined(HALO_CONSOLE_GL_LAYER)
+ 		/* (OpenGL 4.3: macOS's 4.1 copies levels with a blit instead) */
+ 		if (!HOST_GL_COPY_IMAGE)
+ 		{
+@@ -3318,7 +3318,7 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
+ 				gl_target == GL_TEXTURE_3D ? _xgpu_sampler_3d : _xgpu_sampler_2d;
+ 		}
+ 	}
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ 	/* (each unit on its own: macOS's OpenGL 4.1 has no multi-bind of 4.4) */
+ 	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
+ 		state_texture(stage, gl_targets[stage], gl_textures[stage]);
+@@ -3518,7 +3518,7 @@ static void apply_raster_state(BOOL has_depth)
+ 			glCullFace(cull_mode);
+ 		}
+ 	}
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	/* ES draws filled polygons only (wireframe is a debug mode) */
+ 	{
+ 		GLenum polygon_mode = rs[D3DRS_FILLMODE] == D3DFILL_WIREFRAME ? GL_LINE :
+@@ -3534,7 +3534,7 @@ static void apply_raster_state(BOOL has_depth)
+ 
+ 	/* D3DRS_ZBIAS is expressed in these states (D3DDevice_SetRenderState_ZBias) */
+ 	state_enable(&gl_state.offset_fill, GL_POLYGON_OFFSET_FILL, rs[D3DRS_SOLIDOFFSETENABLE] != 0);
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	state_enable(&gl_state.offset_line, GL_POLYGON_OFFSET_LINE, rs[D3DRS_SOLIDOFFSETENABLE] != 0);
+ #endif
+ 	if (rs[D3DRS_SOLIDOFFSETENABLE])
+@@ -3551,7 +3551,7 @@ static void apply_raster_state(BOOL has_depth)
+ 	}
+ }
+ 
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ /* ES 3.0 and macOS's OpenGL 4.1 have no debug callback; debug.gl_debug
+ polls glGetError around each draw instead, reporting each distinct error a
+ few times */
+@@ -3610,7 +3610,7 @@ apply to the others. A memory barrier is one (and only that: nothing
+ here writes images). (OpenGL 4.2's: macOS's 4.1 has none, and needs none.) */
+ static void draw_flush(void)
+ {
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	if (device.flush_every && glMemoryBarrier && ++device.flush_draws >= device.flush_every)
+ 	{
+ 		device.flush_draws = 0;
+@@ -3697,14 +3697,14 @@ static struct program_entry *prepare_draw(BOOL immediate)
+ 		D3D__RenderState[D3DRS_DESTBLEND] == D3DBLEND_SRCALPHA;
+ 	key.point_threshold = key.point_threshold && key.coverage_alpha;
+ 	key.alpha_test_function = D3D__RenderState[D3DRS_ALPHATESTENABLE] ? D3D__RenderState[D3DRS_ALPHAFUNC] : 0;
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	/* (gl_SampleMask: ES has it only from 3.2) */
+ 	if (target_samples > 1 && key.alpha_test_function && !D3D__RenderState[D3DRS_ALPHABLENDENABLE])
+ 		key.alpha_test_samples = (unsigned char)target_samples;
+ #endif
+ 	key.fog_enable = D3D__RenderState[D3DRS_FOGENABLE] != 0;
+ 	key.fog_table_mode = (unsigned char)D3D__RenderState[D3DRS_FOGTABLEMODE];
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	key.count_samples = device.visibility_test_active && xgpu_capabilities.atomic_counters;
+ #endif
+ 
+@@ -3738,7 +3738,7 @@ static struct program_entry *prepare_draw(BOOL immediate)
+ 		stats.draws++;
+ 	draw_flush();
+ 	state_program(entry->program);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	if (key.count_samples)
+ 		glBindBufferRange(GL_ATOMIC_COUNTER_BUFFER, 0, device.visibility_counters,
+ 			(GLintptr)(device.counter_active * sizeof(GLuint)), sizeof(GLuint));
+@@ -4023,7 +4023,7 @@ thousands; Android's GL has no such thread). */
+ 
+ static void buffer_upload(GLenum target, unsigned long offset, unsigned long size, const void *data)
+ {
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	if (size <= BUFFER_UPLOAD_PIECE * BUFFER_UPLOAD_PIECES_MAXIMUM)
+ 	{
+ 		const unsigned char *bytes = data;
+@@ -4083,7 +4083,7 @@ static struct
+ 	/* the page's memory_watch generation when it was uploaded */
+ 	unsigned long generation[MIRROR_PAGE_COUNT];
+ 	unsigned long rewritten_frame[MIRROR_PAGE_COUNT];
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* device.frame at the segment's latest glBufferSubData */
+ 	unsigned long subdata_frame[MIRROR_SEGMENT_COUNT];
+ #endif
+@@ -4177,14 +4177,14 @@ static BOOL mirror_refresh(unsigned long first, unsigned long last)
+ 				xbox_pointer(PLATFORM_CONTIGUOUS_BASE + segment * MIRROR_SEGMENT_SIZE), MIRROR_SEGMENT_SIZE);
+ #else
+ 			glBufferData(GL_COPY_WRITE_BUFFER, MIRROR_SEGMENT_SIZE, NULL, GL_DYNAMIC_DRAW);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 			/* (no glBufferSubData yet: as if long enough ago) */
+ 			mirror.subdata_frame[segment] = device.frame - STREAM_BUFFER_RING;
+ #endif
+ #endif
+ 		}
+ 		glBindBuffer(GL_COPY_WRITE_BUFFER, mirror.buffers[segment]);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		/* Mali copies the whole buffer for a glBufferSubData that queued
+ 		draws might read (see STREAM_BUFFER_RING); unused pages can be
+ 		written without waiting for them. Not while such a copy may be
+@@ -4359,7 +4359,7 @@ static unsigned long stream_upload(const void *data, unsigned long size)
+ 	stream_reserve(size);
+ 	offset = device.stream_offset;
+ 	state_array_buffer(device.stream_buffer);
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	host_gl_buffer_write(GL_ARRAY_BUFFER, (unsigned int)offset, (unsigned int)length, data);
+ #elif defined(__APPLE__)
+ 	buffer_append(GL_ARRAY_BUFFER, offset, length, data);
+@@ -4370,7 +4370,7 @@ static unsigned long stream_upload(const void *data, unsigned long size)
+ 	return offset;
+ }
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* stream_upload, with the D3DCOLOR elements of the stream turned from BGRA
+ into the RGBA byte order ES reads */
+ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *declaration, unsigned long stream,
+@@ -4428,7 +4428,7 @@ static unsigned long index_upload(const void *data, unsigned long size)
+ 		device.index_offset = 0;
+ 	}
+ 	offset = device.index_offset;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	host_gl_buffer_write(GL_ELEMENT_ARRAY_BUFFER, (unsigned int)offset, (unsigned int)length, data);
+ #elif defined(__APPLE__)
+ 	buffer_append(GL_ELEMENT_ARRAY_BUFFER, offset, length, data);
+@@ -4448,7 +4448,7 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
+ 	case D3DVSDT_FLOAT2: *size = 2; *type = GL_FLOAT; break;
+ 	case D3DVSDT_FLOAT3: case D3DVSDT_FLOAT2H: *size = 3; *type = GL_FLOAT; break;
+ 	case D3DVSDT_FLOAT4: *size = 4; *type = GL_FLOAT; break;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* ES has no BGRA attributes: stream_upload_swizzled swaps the bytes */
+ 	case D3DVSDT_D3DCOLOR: *size = 4; *type = GL_UNSIGNED_BYTE; *normalized = GL_TRUE; break;
+ #else
+@@ -4473,7 +4473,7 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
+ /* upload vertices [first, first + count) of every stream the declaration
+ uses and point the attributes at them; attribute data then starts at
+ vertex 0 of the uploaded range */
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* ES has no BGRA attributes, so a stream with colours is swizzled as it is
+ uploaded (stream_upload_swizzled) and cannot come from the mirror */
+ static BOOL stream_has_colors(const struct vertex_shader_object *declaration, unsigned long stream)
+@@ -4497,7 +4497,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+ 	BOOL placed[16] = { FALSE };
+ 	BOOL enabled[XGPU_VERTEX_ATTRIBUTE_COUNT] = { FALSE };
+ 	unsigned long index, total = 0;
+-#if !defined(HALO_ANDROID) && !defined(__APPLE__)
++#if !defined(HALO_GL_ES) && !defined(__APPLE__)
+ 	struct vertex_layout layout;
+ 	unsigned long streams_used = 0;
+ 
+@@ -4519,7 +4519,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+ 		placed[stream] = TRUE;
+ 		stream_buffers[stream] = 0;
+ 		base = PLATFORM_WINDOW_ADDRESS(PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[stream].data)) + first * stride;
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		if (!stream_has_colors(declaration, stream))
+ #endif
+ 		if (mirror_range(base, bytes, &stream_buffers[stream], &stream_offsets[stream], NULL))
+@@ -4544,7 +4544,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+ 			const unsigned char *base = PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[stream].data);
+ 			unsigned long bytes = stride ? stride * count : 64;
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 			stream_offsets[stream] = stream_upload_swizzled(declaration, stream, base + first * stride, bytes, stride);
+ #else
+ 			stream_offsets[stream] = stream_upload(base + first * stride, bytes);
+@@ -4552,7 +4552,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+ 			stream_buffers[stream] = device.stream_buffer;
+ 			stats.streamed_bytes += bytes;
+ 		}
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ 		if (element->type == D3DVSDT_NORMPACKED3)
+ 		{
+ 			state_attribute_stream(element->reg, (GLuint)stream, stream_buffers[stream], 1, GL_UNSIGNED_INT, GL_FALSE,
+@@ -4578,7 +4578,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+ #endif
+ 		enabled[element->reg] = TRUE;
+ 	}
+-#if !defined(HALO_ANDROID) && !defined(__APPLE__)
++#if !defined(HALO_GL_ES) && !defined(__APPLE__)
+ 	/* (the layout follows from the declaration and the streams it has, so
+ 	the same two have the same vertex array: no need to look it up) */
+ 	if (!declaration->vertex_array || declaration->vertex_array_streams != streams_used)
+@@ -4690,7 +4690,7 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+ 		return;
+ 	/* quads are drawn as triangles, from indices made for the draw */
+ 	mirrored = primitive_type != D3DPT_QUADLIST &&
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		xgpu_capabilities.base_vertex &&
+ #endif
+ 		mirror_range(PLATFORM_WINDOW_ADDRESS(index_data), vertex_count * sizeof(WORD), &index_buffer, &index_offset, &generation);
+@@ -4713,7 +4713,7 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+ 		indices = quad_indices(index_data, vertex_count, &count);
+ 		source = indices;
+ 	}
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	if (!xgpu_capabilities.base_vertex)
+ 	{
+ 		/* the indices are copied anyway: rebase them */
+@@ -4768,7 +4768,7 @@ void WINAPI D3DDevice_End(void)
+ 		return;
+ 	trace_draw("immediate", type, count, device.immediate_vertices);
+ 	offset = stream_upload(device.immediate_vertices, count * stride);
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ 	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
+ 	{
+ 		state_attribute_stream(index, 0, device.stream_buffer, 4, GL_FLOAT, GL_FALSE, FALSE, (GLsizei)stride,
+@@ -4990,7 +4990,7 @@ static void write_screenshot_from(const char *name, unsigned long width, unsigne
+ 	image viewers would show it as transparency */
+ 	for (row = 0; row < width * height; row++)
+ 	{
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		unsigned char red = pixels[row * 4];
+ 
+ 		pixels[row * 4] = pixels[row * 4 + 2];
+@@ -5034,7 +5034,7 @@ static void write_window_screenshot(int window_width, int window_height)
+ 	write_screenshot_from("window", (unsigned long)window_width, (unsigned long)window_height, FALSE);
+ }
+ 
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ /* the GPU copies the counts of the previous frame's tests into their slots
+ (given by name: Mesa's GL thread waits for everything before a
+ glGetQueryObjectuiv, even one into a bound buffer). A copy right after each
+@@ -5135,7 +5135,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 			platform_log("present back buffer %08lx texture %u", (unsigned long)device.back_buffer.Data,
+ 				back_buffer->target.texture);
+ 		render_target_resolve(&back_buffer->target);
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 		visibility_copy_batch();
+ #endif
+ 		if (screenshot_every > 0 && !screenshot_window && device.frame % (unsigned long)screenshot_every == 0)
+@@ -5166,7 +5166,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 		(ui_overlay.c) */
+ 		ui_overlay_present(x, y, width, height, window_width, window_height);
+ #endif
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 		/* the picture's alpha is the render target's, which the game uses
+ 		for its own blending, not coverage: the window is opaque whatever
+ 		the driver gave its pixels (sdl_platform.c asks for none) */
+@@ -5188,7 +5188,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 		platform_video_swap();
+ 		xgpu_gl_state_invalidate();
+ 		xgpu_texture_cache_begin_frame();
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		if (xgpu_capabilities.atomic_counters)
+ 		{
+ 			/* this frame's counts, for when the GPU is done with it (the
+diff --git a/port/linux/src/gl.h b/port/linux/src/gl.h
+index 64a9c7e..663cbed 100644
+--- a/port/linux/src/gl.h
++++ b/port/linux/src/gl.h
+@@ -16,7 +16,7 @@ Windows it is __stdcall too, and SDL would include windows.h without it) */
+ #ifndef _WIN32
+ #undef APIENTRY
+ #endif
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ #include <GLES3/gl32.h>
+ #include <GLES2/gl2ext.h>
+ #define GLAPIENTRY GL_APIENTRY
+@@ -25,7 +25,7 @@ Windows it is __stdcall too, and SDL would include windows.h without it) */
+ #endif
+ #pragma pop_macro("APIENTRY")
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* OpenGL ES 3.2 (port/android/README.md); tools/android_gl_stubs.py reads
+ this list to generate the guest's entry points */
+ /* ANDROID_GL_FUNCTIONS_BEGIN */
+@@ -269,7 +269,7 @@ context has the extension, never required (gl_functions.c). On ES 3.0 and
+ 
+ #define GL_DECLARE_FUNCTION(name) extern __typeof__(&name) halo_##name;
+ GL_FUNCTIONS(GL_DECLARE_FUNCTION)
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ GL_OPTIONAL_FUNCTIONS(GL_DECLARE_FUNCTION)
+ #endif
+ #undef GL_DECLARE_FUNCTION
+@@ -277,7 +277,7 @@ GL_OPTIONAL_FUNCTIONS(GL_DECLARE_FUNCTION)
+ /* call sites use the ordinary names; gl_functions.c, which defines the
+ pointers, sees the declarations without these aliases */
+ #ifndef GL_FUNCTIONS_DEFINE
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ #define glGetString halo_glGetString
+ #define glGetIntegerv halo_glGetIntegerv
+ #define glCopyImageSubData halo_glCopyImageSubData
+@@ -512,4 +512,10 @@ pointers, sees the declarations without these aliases */
+ /* returns FALSE (and logs) if a required function is missing */
+ int gl_functions_load(void);
+ 
++#ifdef HALO_CONSOLE_GLES2
++/* the port's: with the driver's ES 2 entry points loaded, fills in (or
++replaces) the ES 3 ones the renderer uses; FALSE if it cannot */
++int console_gles2_layer(void);
++#endif
++
+ #endif
+diff --git a/port/linux/src/gl_functions.c b/port/linux/src/gl_functions.c
+index 157160e..72cbfc7 100644
+--- a/port/linux/src/gl_functions.c
++++ b/port/linux/src/gl_functions.c
+@@ -13,7 +13,7 @@ Run-time resolution of the OpenGL entry points listed in gl.h.
+ 
+ #define GL_DEFINE_FUNCTION(name) __typeof__(&name) halo_##name;
+ GL_FUNCTIONS(GL_DEFINE_FUNCTION)
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ GL_OPTIONAL_FUNCTIONS(GL_DEFINE_FUNCTION)
+ #endif
+ 
+@@ -29,6 +29,25 @@ int gl_functions_load(void)
+ 		!strcmp(#name, "glVertexAttribIFormat") || !strcmp(#name, "glVertexAttribBinding") || \
+ 		!strcmp(#name, "glBindVertexBuffer") || !strcmp(#name, "glGetQueryBufferObjectuiv") || \
+ 		!strcmp(#name, "glBindTextures"))
++#ifdef HALO_CONSOLE_GLES2
++	/* ES 2: what the driver has, then the port's layer fills in the ES 3
++	the renderer uses (console_gles2_layer), and only then is anything
++	missing a failure */
++#define GL_LOAD_FUNCTION(name) \
++	halo_##name = (__typeof__(halo_##name))SDL_GL_GetProcAddress(#name);
++	GL_FUNCTIONS(GL_LOAD_FUNCTION)
++#undef GL_LOAD_FUNCTION
++	if (!console_gles2_layer())
++		success = FALSE;
++#define GL_CHECK_FUNCTION(name) \
++	if (!halo_##name && !GL_OPTIONAL_FUNCTION(name)) \
++	{ \
++		platform_log("OpenGL function %s is unavailable", #name); \
++		success = FALSE; \
++	}
++	GL_FUNCTIONS(GL_CHECK_FUNCTION)
++#undef GL_CHECK_FUNCTION
++#else
+ #define GL_LOAD_FUNCTION(name) \
+ 	halo_##name = (__typeof__(halo_##name))SDL_GL_GetProcAddress(#name); \
+ 	if (!halo_##name && !GL_OPTIONAL_FUNCTION(name)) \
+@@ -38,7 +57,8 @@ int gl_functions_load(void)
+ 	}
+ 	GL_FUNCTIONS(GL_LOAD_FUNCTION)
+ #undef GL_LOAD_FUNCTION
+-#ifdef HALO_ANDROID
++#endif
++#ifdef HALO_GL_ES
+ 	/* a missing one is no failure: the renderer uses each only where the
+ 	context lists its extension (gl_initialize, d3d8_gl.c) */
+ #define GL_LOAD_OPTIONAL_FUNCTION(name) \
 diff --git a/port/linux/src/memory_watch.c b/port/linux/src/memory_watch.c
 index b78ff32..c3626ef 100644
 --- a/port/linux/src/memory_watch.c
@@ -184,6 +882,105 @@ index 3c0ccc2..c502bea 100644
  #elif defined(__PPC__)
  /* PowerPC (the Wii U): the rounding mode is the FPSCR's RN field, the sticky
  exception flags its OX, UX, ZX, XX and VX* bits. As on AArch64, precision
+diff --git a/port/linux/src/nv2a_psh.c b/port/linux/src/nv2a_psh.c
+index 2f3dc1e..a779db9 100644
+--- a/port/linux/src/nv2a_psh.c
++++ b/port/linux/src/nv2a_psh.c
+@@ -314,7 +314,7 @@ static void dot_input(struct xgpu_text *text, const DWORD *state, int stage)
+ 	}
+ }
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* ES samplers have no LOD bias: pass D3DTSS_MIPMAPLODBIAS to the lookup */
+ #define SAMPLE_BIAS ", texture_lod_bias[%d]"
+ #define SHADER_VERSION \
+@@ -339,21 +339,21 @@ static void sample(struct xgpu_text *text, const struct nv2a_pixel_shader_key *k
+ 	{
+ 	case _xgpu_sampler_3d:
+ 		xgpu_text_append(text, "texture(tex%d, (%s).xyz" SAMPLE_BIAS ")", stage, coordinates
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 			, stage
+ #endif
+ 			);
+ 		break;
+ 	case _xgpu_sampler_cube:
+ 		xgpu_text_append(text, "texture(tex%d, (%s).xyz" SAMPLE_BIAS ")", stage, coordinates
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 			, stage
+ #endif
+ 			);
+ 		break;
+ 	default:
+ 		xgpu_text_append(text, "texture(tex%d, (%s).xy * texture_scale[%d].xy" SAMPLE_BIAS ")", stage, coordinates, stage
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 			, stage
+ #endif
+ 			);
+@@ -599,7 +599,7 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
+ 	if (combiner_count > 8)
+ 		combiner_count = 8;
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	xgpu_text_append(&text, "#version %s\n", xgpu_capabilities.shading_language);
+ 	if (key->count_samples)
+ 	{
+@@ -746,7 +746,7 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
+ 		xgpu_text_append(&text, "\tresult = vec4(t0.rgb, 1.0);\n");
+ 	if (config_boolean("debug.gpu_debug_flat"))
+ 		xgpu_text_append(&text, "\tresult = xD0.a > 0.0 ? vec4(xD0.rgb, 1.0) : vec4(1.0, 0.0, 1.0, 1.0);\n");
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	if (key->count_samples)
+ 		xgpu_text_append(&text, "\tatomicCounterIncrement(visible_samples);\n");
+ #endif
+diff --git a/port/linux/src/nv2a_vsh.c b/port/linux/src/nv2a_vsh.c
+index dd9892a..fbc62d4 100644
+--- a/port/linux/src/nv2a_vsh.c
++++ b/port/linux/src/nv2a_vsh.c
+@@ -330,7 +330,7 @@ BOOL nv2a_vertex_shader_lighting(const DWORD *instructions, unsigned long instru
+ /* ---------- translation */
+ 
+ static const char shader_prologue[] =
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* the #version line comes first, from the context's capabilities */
+ 	"precision highp float;\n"
+ 	"precision highp int;\n"
+@@ -392,7 +392,7 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
+ 	struct xgpu_text text = { 0 };
+ 	unsigned long index;
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	xgpu_text_append(&text, "#version %s\n", xgpu_capabilities.shading_language);
+ #endif
+ 	xgpu_text_append(&text, "%s", shader_prologue);
+diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
+index ba0621a..ef22f89 100644
+--- a/port/linux/src/port_config.c
++++ b/port/linux/src/port_config.c
+@@ -236,6 +236,8 @@ static const struct config_setting config_settings[] =
+ 		_platform_android,
+ 		"Make the GPU fault on purpose at the 1200th frame, to see gpu_trace's record.\n"
+ 		"Takes effect the next start." },
++/* (every build's: particles.c and object_lights.c read them each frame) */
++#endif
+ #ifdef HALO_SWITCH_CONSOLE
+ 	{ "display.particle_limit", _config_integer, "2048", "HALO_PARTICLE_LIMIT", _environment_value, _platform_all,
+ #else
+@@ -279,6 +281,7 @@ static const struct config_setting config_settings[] =
+ 		"0 for no limit, as on the Xbox (a near light's highlights cover most\n"
+ 		"of the screen: the costliest pass of a firefight): the desktop's\n"
+ 		"default; the consoles' is 2. Changes at once." },
++#ifdef HALO_SWITCH_CONSOLE
+ 	{ "debug.gpu_profile", _config_boolean, "false", "HALO_GPU_PROFILE", _environment_set_is_true, _platform_android,
+ 		"Every 300 frames, log the GPU's time by part of the frame (the sky, the\n"
+ 		"objects, the fog...) and what a frame asks of it. Takes effect the next start." },
 diff --git a/port/linux/src/posix_crash.c b/port/linux/src/posix_crash.c
 index ecf8c92..991cf26 100644
 --- a/port/linux/src/posix_crash.c
@@ -214,6 +1011,36 @@ index f545dcf..46dae40 100644
  #else
  #include <sys/random.h>
  #include <sys/random.h>
+diff --git a/port/linux/src/sdl_platform.c b/port/linux/src/sdl_platform.c
+index ad49e59..1c86e64 100644
+--- a/port/linux/src/sdl_platform.c
++++ b/port/linux/src/sdl_platform.c
+@@ -1152,6 +1152,12 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
+ 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+ 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+ 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
++#elif defined(HALO_CONSOLE_GLES2)
++	/* ES 2, which the port fills out to the ES 3 the renderer uses
++	(console_gles2_layer) */
++	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
++	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
++	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+ #elif defined(__APPLE__)
+ 	/* macOS stops at OpenGL 4.1, whose core contexts must be forward
+ 	compatible; the renderer does without what it uses from later versions
+diff --git a/port/linux/src/ui_overlay.c b/port/linux/src/ui_overlay.c
+index 37c6551..349afdf 100644
+--- a/port/linux/src/ui_overlay.c
++++ b/port/linux/src/ui_overlay.c
+@@ -788,7 +788,7 @@ static GLuint compile(GLenum type, const char *body)
+ 	const char *pointer = source;
+ 	GLint status = 0;
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	snprintf(source, sizeof(source), "#version %s\nprecision highp float;\nprecision highp sampler2DArray;\n%s",
+ 		xgpu_capabilities.shading_language, body);
+ #elif defined(__APPLE__)
 diff --git a/port/linux/src/xbox_memory.c b/port/linux/src/xbox_memory.c
 index 30a96ae..d36cd77 100644
 --- a/port/linux/src/xbox_memory.c
@@ -231,6 +1058,162 @@ index 30a96ae..d36cd77 100644
  #include <errno.h>
  #ifdef HALO_ANDROID
  #include <stdio.h>
+diff --git a/port/linux/src/xbox_textures.c b/port/linux/src/xbox_textures.c
+index 888aa99..1c45529 100644
+--- a/port/linux/src/xbox_textures.c
++++ b/port/linux/src/xbox_textures.c
+@@ -21,7 +21,7 @@ memory_watch.c detects that by write-protecting the pages.
+ #include "port_config.h"
+ 
+ #include <stdio.h>
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ #define GL_BGRA GL_RGBA
+ #endif
+ #include <stdlib.h>
+@@ -669,7 +669,7 @@ static void bc7_decode_level(const unsigned char *source, unsigned long width, u
+ 	}
+ }
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* ---------- DXT decoding, for ES drivers without S3TC (Mali) */
+ 
+ static unsigned long color565(unsigned long value)
+@@ -809,7 +809,7 @@ static GLenum compressed_format(unsigned char kind)
+ /* debug.texture_dump_directory writes level 0 of every upload as a TGA, read back from GL */
+ static void texture_dump(GLenum target, const struct xgpu_texture_description *description)
+ {
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	/* ES cannot read textures back */
+ 	(void)target;
+ 	(void)description;
+@@ -859,7 +859,7 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+ 	unsigned long *converted;
+ 	unsigned long face, level;
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	decode_compressed = description->compressed && !xgpu_capabilities.s3tc;
+ #endif
+ 	if (information.kind == _texel_bc7)
+@@ -878,7 +878,7 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+ 	{
+ 		GLint channels[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 		/* converted texels are BGRA in memory (32-bit ARGB words); ES takes
+ 		RGBA */
+ 		if (converted)
+@@ -949,7 +949,7 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+ 					bc7_decode_level(source, (unsigned long)width, (unsigned long)height, (unsigned long)depth,
+ 						converted);
+ 				else
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 				if (decode_compressed)
+ 					dxt_decode_level(information.kind, source, (unsigned long)width, (unsigned long)height,
+ 						(unsigned long)depth, converted);
+diff --git a/port/linux/src/xgpu.h b/port/linux/src/xgpu.h
+index a3bc74c..50eb1e2 100644
+--- a/port/linux/src/xgpu.h
++++ b/port/linux/src/xgpu.h
+@@ -13,7 +13,7 @@ device itself (d3d8_gl.c).
+ #include "platform.h"
+ #include "gl.h"
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* OpenGL ES features that are optional (d3d8_gl.c gl_initialize) */
+ struct xgpu_capabilities
+ {
+@@ -104,7 +104,7 @@ lights the diffuse color for each pixel (nv2a_pixel_shader_key
+ per_pixel_lighting). Returns a malloc'd string. */
+ /* OpenGL ES and macOS's OpenGL 4.1 have no glClipControl: vertex shaders
+ convert D3D's clip space themselves (nv2a_vsh.c) */
+-#if defined(HALO_ANDROID) || defined(__APPLE__)
++#if defined(HALO_GL_ES) || defined(__APPLE__)
+ #define HALO_GL_NO_CLIP_CONTROL 1
+ #endif
+ 
+@@ -161,7 +161,7 @@ struct nv2a_pixel_shader_key
+ 
+ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key);
+ 
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ /* ES samplers have no LOD bias of their own */
+ #define XGPU_PIXEL_UNIFORMS_ES "uniform vec4 texture_lod_bias;\n"
+ #else
+diff --git a/port/linux/src/xgpu_post.c b/port/linux/src/xgpu_post.c
+index f5afed8..e5b7a57 100644
+--- a/port/linux/src/xgpu_post.c
++++ b/port/linux/src/xgpu_post.c
+@@ -24,7 +24,7 @@ anti_aliasing_values).
+ 
+ #include <stdlib.h>
+ 
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ #include "zlib_prefixed.h"
+ 
+ /* port/third_party/smaa, embedded by tools/embed_assets.py: the shader's
+@@ -74,7 +74,7 @@ static struct
+ 
+ static void shader_header(struct xgpu_text *text)
+ {
+-#ifdef HALO_ANDROID
++#ifdef HALO_GL_ES
+ 	xgpu_text_append(text,
+ 		"#version %s\n"
+ 		"precision highp float;\n"
+@@ -191,7 +191,7 @@ static const char fxaa_source[] =
+ 	"\tresult = vec4(color_at(position + max(varies ? pixel_offset : 0.0, subpixel) * across), 1.0);\n"
+ 	"}\n";
+ 
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ /* the main functions of SMAA's passes, after SMAA.hlsl; its vertex
+ functions' offsets are found for each pixel */
+ static const char *const smaa_mains[] =
+@@ -270,7 +270,7 @@ static GLuint program_build(int which)
+ 	{
+ 		xgpu_text_append(&text, "%s", fxaa_source);
+ 	}
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	else if (xgpu_smaa_shader_size)
+ 	{
+ 		xgpu_text_append(&text,
+@@ -361,7 +361,7 @@ static void textures_fit(BOOL smaa, unsigned long width, unsigned long height)
+ 	}
+ }
+ 
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ /* a lookup texture of SMAA's from its zlib stream; 0 if it does not
+ inflate */
+ static GLuint lookup_texture(const unsigned int *stream, unsigned long stream_size, GLenum format,
+@@ -440,7 +440,7 @@ BOOL xgpu_post_prepare(BOOL smaa)
+ 			return FALSE;
+ 		}
+ 	}
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	if (smaa && !post.area)
+ 	{
+ 		post.area = lookup_texture(xgpu_smaa_area_texture, xgpu_smaa_area_texture_size, GL_RG8, GL_RG,
+@@ -481,7 +481,7 @@ BOOL xgpu_post_anti_alias(BOOL smaa, GLuint framebuffer, unsigned long width, un
+ 	glDisable(GL_BLEND);
+ 	glDisable(GL_CULL_FACE);
+ 	glDisable(GL_POLYGON_OFFSET_FILL);
+-#ifndef HALO_ANDROID
++#ifndef HALO_GL_ES
+ 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+ #endif
+ 	glBindVertexArray(post.vertex_array);
 diff --git a/source/hs/hs_runtime.c b/source/hs/hs_runtime.c
 index a560c4e..4a3cbef 100644
 --- a/source/hs/hs_runtime.c

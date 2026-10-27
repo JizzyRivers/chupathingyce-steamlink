@@ -42,7 +42,12 @@ STEAMLINK_ABI_FLAGS = ["-fsigned-char", "-DHALO_STEAMLINK"]
 # the box's 256 MB (about 200 free): the Xbox's texture cache (22 MB, not the
 # desktop's 256) and its structure surfaces and dynamic triangles a frame,
 # as the Xbox 360's port has them (port/linux/include/halo_port_capacity.h)
-STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES"]
+STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
+                          # the renderer's ES path on the box's ES 2, which
+                          # src/gles2_layer.c fills out to the ES 3 it uses
+                          "-DHALO_CONSOLE_GLES2"]
+# the port's own platform units
+STEAMLINK_SOURCES = ["src/gles2_layer.c"]
 # the sdk's gcc, for its crt files and libgcc (clang finds glibc in the root
 # filesystem)
 GCC_VERSION_DIR = Path("toolchain/lib/gcc/armv7a-cros-linux-gnueabi/9.2.0")
@@ -60,7 +65,7 @@ def add_arguments(parser: Any) -> None:
 
 
 def configure_inputs(port: Any) -> List[Path]:
-    return [port.path("toolchain.cmake"), *hud_configure_inputs()]
+    return [port.path("toolchain.cmake"), port.path("src"), *hud_configure_inputs()]
 
 
 def _repository(port: Any) -> Path:
@@ -135,7 +140,9 @@ def generate(n: Any, sln: Any, port: Any) -> None:
         instruction_set=STEAMLINK_INSTRUCTION_SET,
         # (and configure.py's console options: --release, --console-players)
         extra_flags=[*STEAMLINK_ABI_FLAGS, *STEAMLINK_CAPABILITIES, *console_defines(sln)],
-        include_flags=[f"-I{_posix(sdl / 'include')}"],
+        platform_sources=[port.path(source) for source in STEAMLINK_SOURCES],
+        # (ES 3's headers, Khronos', for its names: the sdk has ES 2's)
+        include_flags=[f"-I{_posix(port.path('include'))}", f"-I{_posix(sdl / 'include')}"],
     )
     objects = linux32_objects(n, units, build_dir / "obj", [], [])
     n.build(
