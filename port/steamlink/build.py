@@ -45,9 +45,12 @@ STEAMLINK_ABI_FLAGS = ["-fsigned-char", "-DHALO_STEAMLINK"]
 STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
                           # the renderer's ES path on the box's ES 2, which
                           # src/gles2_layer.c fills out to the ES 3 it uses
-                          "-DHALO_CONSOLE_GLES2"]
+                          "-DHALO_CONSOLE_GLES2",
+                          # the box's sound, through the firmware's SDL2
+                          # (src/steamlink_audio.c)
+                          "-DHALO_CONSOLE_AUDIO_OUTPUT"]
 # the port's own platform units
-STEAMLINK_SOURCES = ["src/gles2_layer.c"]
+STEAMLINK_SOURCES = ["src/gles2_layer.c", "src/steamlink_audio.c"]
 # the sdk's gcc, for its crt files and libgcc (clang finds glibc in the root
 # filesystem)
 GCC_VERSION_DIR = Path("toolchain/lib/gcc/armv7a-cros-linux-gnueabi/9.2.0")

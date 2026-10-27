@@ -1,3 +1,22 @@
+diff --git a/port/linux/include/halo_console_features.h b/port/linux/include/halo_console_features.h
+index adc0e7f..a86687c 100644
+--- a/port/linux/include/halo_console_features.h
++++ b/port/linux/include/halo_console_features.h
+@@ -105,6 +105,14 @@ HALO_CONSOLE_XBOX_RENDER_SIZES
+ 	the Xbox's texture cache and the Xbox's structure surfaces and dynamic
+ 	triangles in a frame (halo_port_capacity.h), on a console whose build
+ 	otherwise has the desktop's
++HALO_CONSOLE_GLES2
++	a console with OpenGL ES 2 only: the renderer's ES path (HALO_GL_ES,
++	halo_linux_prefix.h) on an ES 2 context, which console_gles2_layer,
++	defined by the port, fills out to the ES 3 it uses (gl_functions.c)
++HALO_CONSOLE_AUDIO_OUTPUT
++	a console whose sound output SDL does not have: where SDL opens no
++	device, console_audio_start, defined by the port, plays the mixer's
++	output (dsound_sdl.c)
+ HALO_CONSOLE_WAIT_POLL
+ 	a console whose system must be served by the thread that runs the game
+ 	(the Wii U's HOME button): console_wait_poll, defined by the port, is
 diff --git a/port/linux/include/halo_linux_prefix.h b/port/linux/include/halo_linux_prefix.h
 index d05919f..d52f93c 100644
 --- a/port/linux/include/halo_linux_prefix.h
@@ -670,6 +689,40 @@ index 6eba8da..74cfc70 100644
  		if (xgpu_capabilities.atomic_counters)
  		{
  			/* this frame's counts, for when the GPU is done with it (the
+diff --git a/port/linux/src/dsound_sdl.c b/port/linux/src/dsound_sdl.c
+index f39aaf6..a58a5e9 100644
+--- a/port/linux/src/dsound_sdl.c
++++ b/port/linux/src/dsound_sdl.c
+@@ -2444,6 +2444,12 @@ static unsigned long choose_output_channels(SDL_AudioDeviceID device)
+ #endif
+ }
+ 
++#ifdef HALO_CONSOLE_AUDIO_OUTPUT
++/* the port's: plays channels of float samples at rate from mix, called on
++an output thread of its own for each buffer it fills; FALSE if it cannot */
++int console_audio_start(int rate, int channels, void (*mix)(float *output, unsigned long frames));
++#endif
++
+ static void audio_start(void)
+ {
+ 	long buffer_frames;
+@@ -2477,6 +2483,16 @@ static void audio_start(void)
+ 		SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames);
+ 		if (audio_stream_open())
+ 			return;
++#ifdef HALO_CONSOLE_AUDIO_OUTPUT
++		/* the console's own output, where SDL has none (the Steam Link's:
++		its HDMI audio is the firmware's own SDL's) */
++		output_channels = 2;
++		if (console_audio_start(OUTPUT_RATE, (int)output_channels, mix))
++		{
++			platform_log("sound: the console's own output");
++			return;
++		}
++#endif
+ 		platform_log("cannot open an audio device (%s); sound is silent", SDL_GetError());
+ 		output_channels = 2;
+ 	}
 diff --git a/port/linux/src/gl.h b/port/linux/src/gl.h
 index 64a9c7e..663cbed 100644
 --- a/port/linux/src/gl.h

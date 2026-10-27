@@ -1,0 +1,3 @@
+name=ChupathingyCE
+icon=icon.png
+run=run.sh
