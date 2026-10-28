@@ -1,8 +1,8 @@
 diff --git a/port/linux/include/halo_console_features.h b/port/linux/include/halo_console_features.h
-index adc0e7f..85dd269 100644
+index adc0e7f..f4f88b3 100644
 --- a/port/linux/include/halo_console_features.h
 +++ b/port/linux/include/halo_console_features.h
-@@ -105,6 +105,23 @@ HALO_CONSOLE_XBOX_RENDER_SIZES
+@@ -105,6 +105,28 @@ HALO_CONSOLE_XBOX_RENDER_SIZES
  	the Xbox's texture cache and the Xbox's structure surfaces and dynamic
  	triangles in a frame (halo_port_capacity.h), on a console whose build
  	otherwise has the desktop's
@@ -23,6 +23,11 @@ index adc0e7f..85dd269 100644
 +	the high-res HUD's pictures decoded each when first drawn, as Android's
 +	are, rather than a map's all at its load (hud_hires.c): about 40 MB less
 +	at once, on a console with little memory (the Steam Link's 256 MB)
++HALO_CONSOLE_PERFORMANCE_MODE
++	a console too slow for the full picture: display.performance_mode, and
++	console_performance_update, defined by the port, called each pass of
++	the event pump (sdl_platform.c), which leaves passes out while it is on
++	and switches it on a button of the port's
  HALO_CONSOLE_WAIT_POLL
  	a console whose system must be served by the thread that runs the game
  	(the Wii U's HOME button): console_wait_poll, defined by the port, is
@@ -1156,7 +1161,7 @@ index dd9892a..fbc62d4 100644
  #endif
  	xgpu_text_append(&text, "%s", shader_prologue);
 diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
-index ba0621a..e2fdd61 100644
+index ba0621a..ca9ab64 100644
 --- a/port/linux/src/port_config.c
 +++ b/port/linux/src/port_config.c
 @@ -236,6 +236,8 @@ static const struct config_setting config_settings[] =
@@ -1176,7 +1181,20 @@ index ba0621a..e2fdd61 100644
  	{ "debug.gpu_profile", _config_boolean, "false", "HALO_GPU_PROFILE", _environment_set_is_true, _platform_android,
  		"Every 300 frames, log the GPU's time by part of the frame (the sky, the\n"
  		"objects, the fog...) and what a frame asks of it. Takes effect the next start." },
-@@ -484,9 +487,19 @@ static const struct config_setting config_settings[] =
+@@ -373,6 +376,12 @@ static const struct config_setting config_settings[] =
+ 	{ "display.anisotropic_filtering", _config_integer, "0", "HALO_ANISOTROPIC_FILTERING", _environment_value,
+ 		_platform_all,
+ 		"Sharper textures at a slant: 0 (off, the Xbox's), 2, 4, 8 or 16." },
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++	{ "display.performance_mode", _config_boolean, "true", "HALO_PERFORMANCE_MODE", _environment_value, _platform_all,
++		"Start in performance mode: the level drawn without its decals, dynamic lights, reflections and specular\n"
++		"highlights, and no lens flares, for the frame rate. Hold Back and press down on the d-pad (or F9) to switch\n"
++		"it in the game." },
++#endif
+ 	{ "display.full_model_detail", _config_boolean, "false", "HALO_FULL_MODEL_DETAIL", _environment_value,
+ 		_platform_all,
+ 		"Draw every model at full detail at any distance." },
+@@ -484,9 +493,19 @@ static const struct config_setting config_settings[] =
  		"Binaural 3D sound for headphones (HRTF): \"off\", \"on\", or \"auto\" for\n"
  		"on when the output's name says it is headphones. Stereo output only." },
  
@@ -1227,7 +1245,7 @@ index f545dcf..46dae40 100644
  #include <sys/random.h>
  #include <sys/random.h>
 diff --git a/port/linux/src/sdl_platform.c b/port/linux/src/sdl_platform.c
-index ad49e59..1c86e64 100644
+index ad49e59..3b2c6da 100644
 --- a/port/linux/src/sdl_platform.c
 +++ b/port/linux/src/sdl_platform.c
 @@ -1152,6 +1152,12 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
@@ -1243,6 +1261,30 @@ index ad49e59..1c86e64 100644
  #elif defined(__APPLE__)
  	/* macOS stops at OpenGL 4.1, whose core contexts must be forward
  	compatible; the renderer does without what it uses from later versions
+@@ -1882,6 +1888,12 @@ void platform_scoreboard_scroll(int open, long *notches, long *pages)
+ 	pthread_mutex_unlock(&input_lock);
+ }
+ 
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++/* the port's: performance mode's passes left out, and its switch read
++(halo_console_features.h) */
++void console_performance_update(void);
++#endif
++
+ void platform_pump_events(void)
+ {
+ 	/* debug.exit_after (seconds) ends the game that long after the window
+@@ -1891,6 +1903,10 @@ void platform_pump_events(void)
+ 	static BOOL looked_at_clipboard;
+ 	BOOL look_at_clipboard = !looked_at_clipboard;
+ 
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++	console_performance_update();
++#endif
++
+ #ifdef HALO_GAME_BROWSER
+ 	/* the dedicated server has no window, but stops as asked (SIGTERM or
+ 	SIGINT: SDL's quit event), as a service is stopped */
 diff --git a/port/linux/src/ui_overlay.c b/port/linux/src/ui_overlay.c
 index 37c6551..349afdf 100644
 --- a/port/linux/src/ui_overlay.c
@@ -1466,10 +1508,20 @@ index e766f9c..74ba14f 100644
  #endif
  
 diff --git a/tools/linux_build.py b/tools/linux_build.py
-index a84ceea..555ea41 100644
+index a84ceea..5bc7a0c 100644
 --- a/tools/linux_build.py
 +++ b/tools/linux_build.py
-@@ -545,12 +545,25 @@ class Linux32Units:
+@@ -534,6 +534,9 @@ class Linux32Units:
+     excluded: Set[str] = field(default_factory=set)
+     # more platform units, with the platform layer's flags (after port/linux/src's)
+     platform_sources: List[Path] = field(default_factory=list)
++    # more units that see the game as its own sources do, as port/linux/game's
++    # (a console port's own, after those)
++    game_unit_sources: List[Path] = field(default_factory=list)
+     # more units with the host's ABI, as posix_*.c (after the platform units)
+     native_sources: List[Path] = field(default_factory=list)
+     # (the movies' FFmpeg: its compiler flags and its libraries, for the build
+@@ -545,12 +548,25 @@ class Linux32Units:
      # the portable build's system root and SDL's headers, after the
      # instruction set, for every unit (PortableSdl.cflags)
      sysroot_flags: List[str] = field(default_factory=list)
@@ -1496,7 +1548,7 @@ index a84ceea..555ea41 100644
  
  
  def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags: List[str],
-@@ -563,7 +576,8 @@ def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags:
+@@ -563,7 +579,8 @@ def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags:
      platform_semantics_header = units.platform_semantics_header
      browser_defines = ["-DHALO_GAME_BROWSER"] if units.game_browser else []
      # the instruction set, and the portable build's system root
@@ -1506,3 +1558,12 @@ index a84ceea..555ea41 100644
      # (a debug build checks its stack frames, and stops at the first one
      # overrun, as it stops at the first failed assertion; a release build
      # does not, so that an overrun nobody has met cannot end a game)
+@@ -613,6 +630,8 @@ def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags:
+     # sources do (port/linux/game).
+     for source in sorted(Path(config["game_sources"]).glob("*.c")):
+         add_object(source, game_cflags)
++    for source in units.game_unit_sources:
++        add_object(source, game_cflags)
+     # the dedicated server's director, with the game browser (server/)
+     if units.game_browser:
+         for source in sorted(Path("server/src").glob("*.c")):

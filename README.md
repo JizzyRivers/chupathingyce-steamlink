@@ -2,7 +2,7 @@ chupathingyce-steamlink
 
 halo ce on the og steam link box (the 2015 one). native, not streamed. port of chupathingyce https://github.com/ChupathingyCE/chupathingyce
 
-menus work on the box w sound and the controller, profiles save. a10 loads and plays thru its opening w the characters drawn right. its slow tho: about 4 to 6 fps inside the ship rn (160 to 230 ms a frame), working on it
+menus work on the box w sound and the controller, profiles save. a10 loads and plays thru its opening w the characters drawn right. its slow tho: about 5 to 7 fps inside the ship rn (130 to 180 ms a frame) w performance mode on, working on it
 
 bring ur own copy, same as every other chupathingyce build
 
@@ -19,6 +19,9 @@ the plan
 2. armhf linux build of the game, straight on the box (no pi needed). done: it boots, loads ui.map, builds the menus and runs the main loop at about 115mb. port/steamlink
 3. a gles2 renderer path, main menu first. menu done: the game's gles 3 path (the android one) on top of port/steamlink/src/gles2_layer.c, which fakes the gles 3 bits on the box's gles 2 (vaos, samplers, blits, sized formats, swizzles, glsl es 3.00 rewritten as 1.00). levels done too: a10 draws w its skinned characters. one skinned bump shader still doesnt fit the gc1000 so that kind of thing doesnt draw
 4. framerate, in progress. where a frame goes rn: the vivante driver charges about 0.45 ms a draw no matter how small, and a10 does 200 to 400 draws. the gpu's pixel work is another 50 to 80 ms. fixed so far: sound mixing (was 37% of the cpu), the driver spamming stderr, a useless per pixel divide, and indices copied every draw
+
+performance mode
+on by default. leaves out the level's decals, dynamic lights, reflections, specular and the lens flares, demake style. hold back + dpad down (or f9) to flip it in game, display.performance_mode in config.toml for how it starts. target is 30fps, not there yet, merging the renderer's passes is next
 4. sound: the box has no alsa card 0, valve's audio goes some other way. to figure out
 5. pack it as a steam link app
 
@@ -49,7 +52,7 @@ clang (any clang w arm, llvm's on windows works too) + valve's sdk (https://gith
 
 the patch is the game's x86 bits made arm friendly (fpscr for the control word, arm crash registers, glibc 2.19 gaps, misaligned float loads like the ppc ports), HALO_GL_ES for the renderer's gles path on a console w its own gl layer (HALO_CONSOLE_GLES2), and a fix for settings that only existed on the switch build. goes upstream eventually, capisce
 
-seeing the picture w/o a tv: HALO_GLES2_SHOT=folder saves every 300th frame as a ppm. HALO_GLES2_SLOW, _TRACE, _PROFILE and _EXPERIMENT are the gpu hang hunting tools (gles2_layer.c says what each does)
+seeing the picture w/o a tv: HALO_GLES2_SHOT=folder saves every 300th frame as a ppm. HALO_PERF_LOG=1 logs where each frame goes (world, objects, transparent, present...) w draws per part. HALO_PERF_AB freezes the game and flips script globals on n off to time them on the same picture. HALO_GLES2_SLOW, _TRACE, _PROFILE and _EXPERIMENT are the gpu hang hunting tools (gles2_layer.c says what each does)
 
 port/steamlink/include is khronos' gles 3 and gl2ext headers (mit), the sdk only has old gles 2 ones
 

@@ -58,9 +58,18 @@ STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
                           "-DHALO_CONSOLE_HUD_ON_DEMAND",
                           # linear resampling and no reverb by default: the
                           # sinc resampler took 37% of the box's core
-                          "-DHALO_CONSOLE_LIGHT_AUDIO"]
+                          "-DHALO_CONSOLE_LIGHT_AUDIO",
+                          # the game's frame timing hooks, logged with
+                          # HALO_PERF_LOG set (src/steamlink_perf_log.c)
+                          "-DHALO_PERF_LOG",
+                          # passes left out for the frame rate, switched in
+                          # the game (src/steamlink_performance.c)
+                          "-DHALO_CONSOLE_PERFORMANCE_MODE"]
 # the port's own platform units
-STEAMLINK_SOURCES = ["src/gles2_layer.c", "src/steamlink_audio.c"]
+STEAMLINK_SOURCES = ["src/gles2_layer.c", "src/steamlink_audio.c", "src/steamlink_perf_log.c",
+                     "src/steamlink_performance_switch.c"]
+# the port's units that see the game as its own sources do (no system headers)
+STEAMLINK_GAME_SOURCES = ["src/steamlink_performance.c"]
 # the sdk's gcc, for its crt files and libgcc (clang finds glibc in the root
 # filesystem)
 GCC_VERSION_DIR = Path("toolchain/lib/gcc/armv7a-cros-linux-gnueabi/9.2.0")
@@ -154,6 +163,7 @@ def generate(n: Any, sln: Any, port: Any) -> None:
         # (and configure.py's console options: --release, --console-players)
         extra_flags=[*STEAMLINK_ABI_FLAGS, *STEAMLINK_CAPABILITIES, *console_defines(sln)],
         platform_sources=[port.path(source) for source in STEAMLINK_SOURCES],
+        game_unit_sources=[port.path(source) for source in STEAMLINK_GAME_SOURCES],
         # (ES 3's headers, Khronos', for its names: the sdk has ES 2's)
         include_flags=[f"-I{_posix(port.path('include'))}", f"-I{_posix(sdl / 'include')}"],
     )

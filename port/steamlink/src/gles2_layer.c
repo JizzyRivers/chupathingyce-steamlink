@@ -110,6 +110,15 @@ static struct
 	unsigned long draws, texture_parameters, texture_binds, uniforms, programs, pointers, framebuffers, links, compiles, gpu_indexed;
 } counts;
 
+/* (every draw since the start, for HALO_PERF_AB and the frame timing log,
+steamlink_perf_log.c) */
+static unsigned long draws_total;
+
+unsigned long console_gles2_draw_count(void)
+{
+	return draws_total;
+}
+
 /* HALO_GLES2_TRACE=n: the first n framebuffer, texture, blit and draw calls
 in the log, each draw finished (glFinish) and its error read before the
 next: the last line before a GPU hang names the call that made it */
@@ -1518,6 +1527,7 @@ shows as a frame of 20 */
 static int slow_checking = -1;
 
 static void program_dump(GLuint program, const char *tag);
+static void perf_ab(int frame, Uint64 took);
 
 static void draw_slow_check(const char *kind, GLenum mode, GLsizei count, GLenum type, Uint64 start)
 {
@@ -1677,6 +1687,7 @@ static void draw_traced(const char *kind, GLenum mode, GLsizei count)
 static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count)
 {
 	counts.draws++;
+	draws_total++;
 	Uint64 start = 0;
 
 	if (slow_checking < 0)
@@ -1712,6 +1723,7 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
 	counts.draws++;
+	draws_total++;
 	Uint64 start = 0;
 	struct layer_buffer *elements;
 	const void *offset;
@@ -2153,10 +2165,127 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 			memset(&counts, 0, sizeof(counts));
 			period_start = now;
 		}
+		perf_ab(timed, now - last);
 		last = now;
 		screenshot_maybe(destination_x0 < destination_x1 ? destination_x0 : destination_x1,
 			destination_y0 < destination_y1 ? destination_y0 : destination_y1, abs(destination_x1 - destination_x0),
 			abs(destination_y1 - destination_y0));
+	}
+}
+
+/* HALO_PERF_AB="global[+global...][=a/b] ...": the game frozen (game_speed 0) at frame
+HALO_PERF_AB_AT (1500), and from 30 frames on, each script global in turn
+at a (false unless given) and at b (true) for 12 frames each, three times
+over, and its average frame at each in the log: what a rendering pass costs
+on the same picture. The first 4 frames of each 12 are left out (the change
+settling). A global named layer_experiment is the layer's
+HALO_GLES2_EXPERIMENT bits on every program (layer_experiment=4/0, no draws
+against all). HALO_PERF_AB_OFF="global ...": those false from the freeze on,
+for what is left once they are. */
+extern unsigned char hs_compile_and_evaluate(char const *expression);
+
+#define PERF_AB_HALF 12
+#define PERF_AB_SETTLE 4
+#define PERF_AB_HALVES 6
+
+static void perf_ab(int frame, Uint64 took)
+{
+	static char *list;
+	static char *items[64];
+	static int item_count = -1;
+	static Uint64 sums[2];
+	static unsigned long draws[2], draws_last;
+	static int frames[2];
+	static int start;
+	int position, half, item;
+	char name[512], values[2][24], command[160], *global, *next;
+
+	if (item_count < 0)
+	{
+		const char *value = getenv("HALO_PERF_AB");
+		char *token;
+
+		item_count = 0;
+		if (!value)
+			return;
+		start = getenv("HALO_PERF_AB_AT") ? atoi(getenv("HALO_PERF_AB_AT")) : 1500;
+		list = strdup(value);
+		for (token = strtok(list, " "); token && item_count < 64; token = strtok(NULL, " "))
+			items[item_count++] = token;
+	}
+	if (!item_count)
+		return;
+	if (frame == start)
+	{
+		platform_log("perf ab: the game frozen at frame %d", frame);
+		hs_compile_and_evaluate("(game_speed 0)");
+		if (getenv("HALO_PERF_AB_OFF"))
+		{
+			char *off = strdup(getenv("HALO_PERF_AB_OFF")), *token;
+
+			for (token = strtok(off, " "); token; token = strtok(NULL, " "))
+			{
+				snprintf(command, sizeof(command), "(set %s false)", token);
+				hs_compile_and_evaluate(command);
+			}
+			free(off);
+		}
+	}
+	if (frame < start + 30)
+		return;
+	position = (frame - start - 30) % PERF_AB_HALF;
+	half = (frame - start - 30) / PERF_AB_HALF;
+	item = half / PERF_AB_HALVES;
+	if (position >= PERF_AB_SETTLE && item < item_count)
+	{
+		sums[half & 1] += took;
+		draws[half & 1] += draws_total - draws_last;
+		frames[half & 1]++;
+	}
+	draws_last = draws_total;
+	if (position)
+		return;
+	/* (a half begins: an item's end logged, the next half's value set) */
+	if (half && !(half % PERF_AB_HALVES) && item <= item_count)
+	{
+		platform_log("perf ab: %s: %.1f ms at the first, %.1f ms at the second (%lu and %lu draws a frame)",
+			items[item - 1], frames[0] ? (double)sums[0] / frames[0] : 0.0,
+			frames[1] ? (double)sums[1] / frames[1] : 0.0, frames[0] ? draws[0] / frames[0] : 0,
+			frames[1] ? draws[1] / frames[1] : 0);
+		sums[0] = sums[1] = 0;
+		draws[0] = draws[1] = 0;
+		frames[0] = frames[1] = 0;
+	}
+	if (item >= item_count)
+		return;
+	snprintf(name, sizeof(name), "%s", items[item]);
+	snprintf(values[0], sizeof(values[0]), "false");
+	snprintf(values[1], sizeof(values[1]), "true");
+	{
+		char *equals = strchr(name, '=');
+		char *slash = equals ? strchr(equals, '/') : NULL;
+
+		if (equals && slash)
+		{
+			*equals = *slash = 0;
+			snprintf(values[0], sizeof(values[0]), "%s", equals + 1);
+			snprintf(values[1], sizeof(values[1]), "%s", slash + 1);
+		}
+	}
+	/* (an even count of halves: each ends at the second, as it was) */
+	for (global = name; global; global = next)
+	{
+		next = strchr(global, '+');
+		if (next)
+			*next++ = 0;
+		if (!strcmp(global, "layer_experiment"))
+		{
+			experiment_program = 0;
+			experiment_bits = (unsigned int)atoi(values[half & 1]);
+			continue;
+		}
+		snprintf(command, sizeof(command), "(set %s %s)", global, values[half & 1]);
+		hs_compile_and_evaluate(command);
 	}
 }
 
