@@ -2,7 +2,7 @@ chupathingyce-steamlink
 
 halo ce on the og steam link box (the 2015 one). native, not streamed. port of chupathingyce https://github.com/ChupathingyCE/chupathingyce
 
-the main menu draws on the box. campaign, multiplayer, the whole halo logo, about 23 fps at 640x480. no sound yet, no levels yet, so its a very pretty menu rn
+menus work on the box w sound and the controller, profiles save. a10 loads and plays thru its opening w the characters drawn right. its slow tho: about 4 to 6 fps inside the ship rn (160 to 230 ms a frame), working on it
 
 bring ur own copy, same as every other chupathingyce build
 
@@ -17,7 +17,8 @@ the game wants 32 bit pointers. android has to fake that (arm64 w 32 bit pointer
 the plan
 1. probe: does sdl3 open a gles2 window and see the controller on the box. done, it does: vivante gc1000, 1280x720 at 60, 360 pad works (probe/)
 2. armhf linux build of the game, straight on the box (no pi needed). done: it boots, loads ui.map, builds the menus and runs the main loop at about 115mb. port/steamlink
-3. a gles2 renderer path, main menu first. menu done: the game's gles 3 path (the android one) on top of port/steamlink/src/gles2_layer.c, which fakes the gles 3 bits on the box's gles 2 (vaos, samplers, blits, sized formats, swizzles, glsl es 3.00 rewritten as 1.00). levels are next and the skinned shaders dont link yet (vivante's compiler chokes on more than one relative c[a0] read in a big shader)
+3. a gles2 renderer path, main menu first. menu done: the game's gles 3 path (the android one) on top of port/steamlink/src/gles2_layer.c, which fakes the gles 3 bits on the box's gles 2 (vaos, samplers, blits, sized formats, swizzles, glsl es 3.00 rewritten as 1.00). levels done too: a10 draws w its skinned characters. one skinned bump shader still doesnt fit the gc1000 so that kind of thing doesnt draw
+4. framerate, in progress. where a frame goes rn: the vivante driver charges about 0.45 ms a draw no matter how small, and a10 does 200 to 400 draws. the gpu's pixel work is another 50 to 80 ms. fixed so far: sound mixing (was 37% of the cpu), the driver spamming stderr, a useless per pixel divide, and indices copied every draw
 4. sound: the box has no alsa card 0, valve's audio goes some other way. to figure out
 5. pack it as a steam link app
 

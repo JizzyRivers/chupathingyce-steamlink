@@ -1,8 +1,8 @@
 diff --git a/port/linux/include/halo_console_features.h b/port/linux/include/halo_console_features.h
-index adc0e7f..848fe9d 100644
+index adc0e7f..85dd269 100644
 --- a/port/linux/include/halo_console_features.h
 +++ b/port/linux/include/halo_console_features.h
-@@ -105,6 +105,18 @@ HALO_CONSOLE_XBOX_RENDER_SIZES
+@@ -105,6 +105,23 @@ HALO_CONSOLE_XBOX_RENDER_SIZES
  	the Xbox's texture cache and the Xbox's structure surfaces and dynamic
  	triangles in a frame (halo_port_capacity.h), on a console whose build
  	otherwise has the desktop's
@@ -14,6 +14,11 @@ index adc0e7f..848fe9d 100644
 +	a console whose sound output SDL does not have: where SDL opens no
 +	device, console_audio_start, defined by the port, plays the mixer's
 +	output (dsound_sdl.c)
++HALO_CONSOLE_LIGHT_AUDIO
++	the cheaper sound by default: linear resampling and no reverb
++	(audio.resampling, audio.reverb), on a console with one slow core (the
++	Steam Link's, where the sinc resampler and the reverb took two fifths of
++	the processor)
 +HALO_CONSOLE_HUD_ON_DEMAND
 +	the high-res HUD's pictures decoded each when first drawn, as Android's
 +	are, rather than a map's all at its load (hud_hires.c): about 40 MB less
@@ -114,7 +119,7 @@ index e6cead8..f9ac423 100644
  #define BUILD_IDENTITY_ARCHITECTURE "x86"
  #else
 diff --git a/port/linux/src/d3d8_gl.c b/port/linux/src/d3d8_gl.c
-index 6eba8da..761dffe 100644
+index 6eba8da..a08ba74 100644
 --- a/port/linux/src/d3d8_gl.c
 +++ b/port/linux/src/d3d8_gl.c
 @@ -41,7 +41,7 @@ Conventions carried over from the Xbox:
@@ -197,6 +202,15 @@ index 6eba8da..761dffe 100644
  	/* with atomic counters: one counter per test, used as a ring */
  	GLuint visibility_counters;
  	unsigned long counter_next;
+@@ -622,7 +630,7 @@ static struct
+ 	unsigned long skipped_no_program, skipped_no_target, skipped_link;
+ 	unsigned long target_changes;
+ 	/* vertex and index bytes drawn from the mirror, and streamed */
+-	unsigned long mirrored_bytes, streamed_bytes;
++	unsigned long mirrored_bytes, streamed_bytes, indexed, indexed_mirrored, indexed_direct;
+ } stats;
+ 
+ static D3DDevice *device_pointer(void)
 @@ -669,7 +677,7 @@ compares unequal to everything). */
  
  /* (each attribute pointed at on its own, glVertexAttribPointer: OpenGL ES,
@@ -604,7 +618,45 @@ index 6eba8da..761dffe 100644
  /* ES has no BGRA attributes, so a stream with colours is swizzled as it is
  uploaded (stream_upload_swizzled) and cannot come from the mirror */
  static BOOL stream_has_colors(const struct vertex_shader_object *declaration, unsigned long stream)
-@@ -4497,7 +4506,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -4489,6 +4498,37 @@ static BOOL stream_has_colors(const struct vertex_shader_object *declaration, un
+ }
+ #endif
+ 
++#ifdef HALO_GL_ES
++/* whether every stream a draw of count vertices from first reads is in the
++mirror (setup_streams would stream none of them) */
++static BOOL streams_mirrored(unsigned long first, unsigned long count)
++{
++	struct vertex_shader_object *declaration = device.vertex_shader;
++	BOOL checked[16] = { FALSE };
++	unsigned long index;
++
++	for (index = 0; index < declaration->element_count; index++)
++	{
++		const struct vertex_element *element = &declaration->elements[index];
++		unsigned long stream = element->stream;
++		unsigned long stride = device.streams[stream].stride;
++		unsigned long offset;
++		GLuint buffer;
++
++		if (!device.streams[stream].data || element->type == D3DVSDT_NONE || checked[stream])
++			continue;
++		checked[stream] = TRUE;
++		if (stream_has_colors(declaration, stream) ||
++			!mirror_range(PLATFORM_WINDOW_ADDRESS(PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[stream].data)) +
++				first * stride, stride ? stride * count : 64, &buffer, &offset, NULL))
++		{
++			return FALSE;
++		}
++	}
++	return TRUE;
++}
++#endif
++
+ static void setup_streams(unsigned long first, unsigned long count)
+ {
+ 	struct vertex_shader_object *declaration = device.vertex_shader;
+@@ -4497,7 +4537,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  	BOOL placed[16] = { FALSE };
  	BOOL enabled[XGPU_VERTEX_ATTRIBUTE_COUNT] = { FALSE };
  	unsigned long index, total = 0;
@@ -613,7 +665,7 @@ index 6eba8da..761dffe 100644
  	struct vertex_layout layout;
  	unsigned long streams_used = 0;
  
-@@ -4519,7 +4528,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -4519,7 +4559,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  		placed[stream] = TRUE;
  		stream_buffers[stream] = 0;
  		base = PLATFORM_WINDOW_ADDRESS(PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[stream].data)) + first * stride;
@@ -622,7 +674,7 @@ index 6eba8da..761dffe 100644
  		if (!stream_has_colors(declaration, stream))
  #endif
  		if (mirror_range(base, bytes, &stream_buffers[stream], &stream_offsets[stream], NULL))
-@@ -4544,7 +4553,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -4544,7 +4584,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  			const unsigned char *base = PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[stream].data);
  			unsigned long bytes = stride ? stride * count : 64;
  
@@ -631,7 +683,7 @@ index 6eba8da..761dffe 100644
  			stream_offsets[stream] = stream_upload_swizzled(declaration, stream, base + first * stride, bytes, stride);
  #else
  			stream_offsets[stream] = stream_upload(base + first * stride, bytes);
-@@ -4552,7 +4561,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -4552,7 +4592,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  			stream_buffers[stream] = device.stream_buffer;
  			stats.streamed_bytes += bytes;
  		}
@@ -640,7 +692,7 @@ index 6eba8da..761dffe 100644
  		if (element->type == D3DVSDT_NORMPACKED3)
  		{
  			state_attribute_stream(element->reg, (GLuint)stream, stream_buffers[stream], 1, GL_UNSIGNED_INT, GL_FALSE,
-@@ -4578,7 +4587,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -4578,7 +4618,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  #endif
  		enabled[element->reg] = TRUE;
  	}
@@ -649,16 +701,41 @@ index 6eba8da..761dffe 100644
  	/* (the layout follows from the declaration and the streams it has, so
  	the same two have the same vertex array: no need to look it up) */
  	if (!declaration->vertex_array || declaration->vertex_array_streams != streams_used)
-@@ -4690,7 +4699,7 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -4690,12 +4730,30 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  		return;
  	/* quads are drawn as triangles, from indices made for the draw */
  	mirrored = primitive_type != D3DPT_QUADLIST &&
 -#ifdef HALO_ANDROID
-+#ifdef HALO_GL_ES
- 		xgpu_capabilities.base_vertex &&
- #endif
+-		xgpu_capabilities.base_vertex &&
+-#endif
  		mirror_range(PLATFORM_WINDOW_ADDRESS(index_data), vertex_count * sizeof(WORD), &index_buffer, &index_offset, &generation);
-@@ -4713,7 +4722,7 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+ 	index_extent(index_data, vertex_count, generation, mirrored, &minimum, &maximum);
+ 	trace_draw("indexed", primitive_type, vertex_count, NULL);
++	stats.indexed++;
++	stats.indexed_mirrored += mirrored;
++#ifdef HALO_GL_ES
++	/* no base vertex: the mirror's indices drawn as they are, the streams
++	from the base vertex itself, when they are all in the mirror too (the
++	driver then copies nothing, and a model's draws point at the same
++	vertices one after another) */
++	if (mirrored && !xgpu_capabilities.base_vertex)
++	{
++		if (streams_mirrored(device.base_vertex_index, maximum + 1))
++		{
++			setup_streams(device.base_vertex_index, maximum + 1);
++			state_element_array_buffer(index_buffer);
++			glDrawElements(primitive_mode(primitive_type), (GLsizei)vertex_count, GL_UNSIGNED_SHORT,
++				(const void *)(uintptr_t)index_offset);
++			stats.indexed_direct++;
++			return;
++		}
++		mirrored = FALSE;
++	}
++#endif
+ 	/* (the streams from the base vertex on: index i is vertex base + i) */
+ 	setup_streams(device.base_vertex_index + minimum, maximum - minimum + 1);
+ 	if (mirrored)
+@@ -4713,7 +4771,7 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  		indices = quad_indices(index_data, vertex_count, &count);
  		source = indices;
  	}
@@ -667,7 +744,7 @@ index 6eba8da..761dffe 100644
  	if (!xgpu_capabilities.base_vertex)
  	{
  		/* the indices are copied anyway: rebase them */
-@@ -4768,7 +4777,7 @@ void WINAPI D3DDevice_End(void)
+@@ -4768,7 +4826,7 @@ void WINAPI D3DDevice_End(void)
  		return;
  	trace_draw("immediate", type, count, device.immediate_vertices);
  	offset = stream_upload(device.immediate_vertices, count * stride);
@@ -676,7 +753,7 @@ index 6eba8da..761dffe 100644
  	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
  	{
  		state_attribute_stream(index, 0, device.stream_buffer, 4, GL_FLOAT, GL_FALSE, FALSE, (GLsizei)stride,
-@@ -4990,7 +4999,7 @@ static void write_screenshot_from(const char *name, unsigned long width, unsigne
+@@ -4990,7 +5048,7 @@ static void write_screenshot_from(const char *name, unsigned long width, unsigne
  	image viewers would show it as transparency */
  	for (row = 0; row < width * height; row++)
  	{
@@ -685,7 +762,7 @@ index 6eba8da..761dffe 100644
  		unsigned char red = pixels[row * 4];
  
  		pixels[row * 4] = pixels[row * 4 + 2];
-@@ -5034,7 +5043,7 @@ static void write_window_screenshot(int window_width, int window_height)
+@@ -5034,7 +5092,7 @@ static void write_window_screenshot(int window_width, int window_height)
  	write_screenshot_from("window", (unsigned long)window_width, (unsigned long)window_height, FALSE);
  }
  
@@ -694,7 +771,7 @@ index 6eba8da..761dffe 100644
  /* the GPU copies the counts of the previous frame's tests into their slots
  (given by name: Mesa's GL thread waits for everything before a
  glGetQueryObjectuiv, even one into a bound buffer). A copy right after each
-@@ -5135,7 +5144,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -5135,7 +5193,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  			platform_log("present back buffer %08lx texture %u", (unsigned long)device.back_buffer.Data,
  				back_buffer->target.texture);
  		render_target_resolve(&back_buffer->target);
@@ -703,7 +780,7 @@ index 6eba8da..761dffe 100644
  		visibility_copy_batch();
  #endif
  		if (screenshot_every > 0 && !screenshot_window && device.frame % (unsigned long)screenshot_every == 0)
-@@ -5166,7 +5175,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -5166,7 +5224,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		(ui_overlay.c) */
  		ui_overlay_present(x, y, width, height, window_width, window_height);
  #endif
@@ -712,7 +789,7 @@ index 6eba8da..761dffe 100644
  		/* the picture's alpha is the render target's, which the game uses
  		for its own blending, not coverage: the window is opaque whatever
  		the driver gave its pixels (sdl_platform.c asks for none) */
-@@ -5188,7 +5197,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -5188,7 +5246,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		platform_video_swap();
  		xgpu_gl_state_invalidate();
  		xgpu_texture_cache_begin_frame();
@@ -721,6 +798,20 @@ index 6eba8da..761dffe 100644
  		if (xgpu_capabilities.atomic_counters)
  		{
  			/* this frame's counts, for when the GPU is done with it (the
+@@ -5235,10 +5293,11 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 	if (debug_settings.statistics && device.frame % 60 == 0)
+ 	{
+ 		platform_log("frame %lu: %lu draws, %lu immediate, %lu clears, %lu target changes; skipped %lu no program, %lu no target, %lu link; "
+-			"%lu KB mirrored, %lu KB streamed",
++			"%lu KB mirrored, %lu KB streamed; %lu indexed, %lu from the mirror's indices, %lu drawn from them",
+ 			device.frame, stats.draws / stats.presents, stats.immediate_draws / stats.presents, stats.clears / stats.presents,
+ 			stats.target_changes / stats.presents, stats.skipped_no_program, stats.skipped_no_target, stats.skipped_link,
+-			stats.mirrored_bytes / stats.presents / 1024, stats.streamed_bytes / stats.presents / 1024);
++			stats.mirrored_bytes / stats.presents / 1024, stats.streamed_bytes / stats.presents / 1024,
++			stats.indexed / stats.presents, stats.indexed_mirrored / stats.presents, stats.indexed_direct / stats.presents);
+ 		memset(&stats, 0, sizeof(stats));
+ 	}
+ 	platform_pump_events();
 diff --git a/port/linux/src/dsound_sdl.c b/port/linux/src/dsound_sdl.c
 index f39aaf6..a58a5e9 100644
 --- a/port/linux/src/dsound_sdl.c
@@ -1065,7 +1156,7 @@ index dd9892a..fbc62d4 100644
  #endif
  	xgpu_text_append(&text, "%s", shader_prologue);
 diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
-index ba0621a..ef22f89 100644
+index ba0621a..e2fdd61 100644
 --- a/port/linux/src/port_config.c
 +++ b/port/linux/src/port_config.c
 @@ -236,6 +236,8 @@ static const struct config_setting config_settings[] =
@@ -1085,6 +1176,26 @@ index ba0621a..ef22f89 100644
  	{ "debug.gpu_profile", _config_boolean, "false", "HALO_GPU_PROFILE", _environment_set_is_true, _platform_android,
  		"Every 300 frames, log the GPU's time by part of the frame (the sky, the\n"
  		"objects, the fog...) and what a frame asks of it. Takes effect the next start." },
+@@ -484,9 +487,19 @@ static const struct config_setting config_settings[] =
+ 		"Binaural 3D sound for headphones (HRTF): \"off\", \"on\", or \"auto\" for\n"
+ 		"on when the output's name says it is headphones. Stereo output only." },
+ 
++#ifdef HALO_CONSOLE_LIGHT_AUDIO
++	/* (a console with one slow core: the sinc resampler and the reverb were
++	two fifths of the Steam Link's processor) */
++	{ "audio.reverb", _config_boolean, "false", "HALO_REVERB", _environment_value, _platform_all,
++#else
+ 	{ "audio.reverb", _config_boolean, "true", "HALO_REVERB", _environment_value, _platform_all,
++#endif
+ 		"Echo sounds to match the place you are in." },
++#ifdef HALO_CONSOLE_LIGHT_AUDIO
++	{ "audio.resampling", _config_string, "\"linear\"", "HALO_AUDIO_RESAMPLING", _environment_value, _platform_all,
++#else
+ 	{ "audio.resampling", _config_string, "\"sinc\"", "HALO_AUDIO_RESAMPLING", _environment_value, _platform_all,
++#endif
+ 		"How sounds are converted to 48 kHz: \"sinc\" or \"linear\"." },
+ 
+ 	{ "input.touch_controls", _config_string, "\"on\"", "HALO_TOUCH_CONTROLS", _environment_value, _platform_android,
 diff --git a/port/linux/src/posix_crash.c b/port/linux/src/posix_crash.c
 index ecf8c92..991cf26 100644
 --- a/port/linux/src/posix_crash.c

@@ -103,6 +103,13 @@ static void layer_once(int *said, const char *format, ...)
 
 #define LAYER_ONCE(...) do { static int said; layer_once(&said, __VA_ARGS__); } while (0)
 
+/* the driver calls the layer makes, counted for the frame timings' line
+(each 300 frames: where the driver's time goes) */
+static struct
+{
+	unsigned long draws, texture_parameters, texture_binds, uniforms, programs, pointers, framebuffers, links, compiles, gpu_indexed;
+} counts;
+
 /* HALO_GLES2_TRACE=n: the first n framebuffer, texture, blit and draw calls
 in the log, each draw finished (glFinish) and its error read before the
 next: the last line before a GPU hang names the call that made it */
@@ -299,6 +306,7 @@ static void sampler_apply(GLuint unit)
 		}
 		if (unit != active_unit)
 			real.ActiveTexture(GL_TEXTURE0 + unit);
+		counts.texture_parameters++;
 		if (texture->applied_min != min_filter)
 			real.TexParameteri(target, GL_TEXTURE_MIN_FILTER, min_filter);
 		if (texture->applied_mag != sampler->mag_filter)
@@ -322,9 +330,16 @@ static void GL_APIENTRY layer_ActiveTexture(GLenum unit)
 	real.ActiveTexture(unit);
 }
 
+/* a 1x1 white texture where the renderer binds none: a shader that samples
+a unit with nothing bound makes Vivante's driver print "texture(id=0) is
+not completed" (to standard error, the game's log) for each draw, which
+was most of the box's log and a write to its flash each time */
+static GLuint texture_white;
+
 static void GL_APIENTRY layer_BindTexture(GLenum target, GLuint texture)
 {
-	real.BindTexture(target, texture);
+	counts.texture_binds++;
+	real.BindTexture(target, texture || target != GL_TEXTURE_2D ? texture : texture_white);
 	if (active_unit < LAYER_TEXTURE_UNITS && (target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP))
 	{
 		unit_textures[active_unit][target_slot(target)] = texture;
@@ -713,13 +728,21 @@ The renderer streams its vertices and indices into a ring of large buffers
 flushes the CPU's caches over the buffer for each, which made a frame take
 seconds. Here a buffer object is memory of the process's, and a draw hands
 the driver pointers into it (ES 2's client arrays), which copies only what
-the draw reads. No buffer object reaches the driver. */
+the draw reads. Only the mirror's buffers (console_gl_buffer_alias) have a
+GPU copy, its vertices and indices drawn from that. */
+
+static __typeof__(halo_glGenBuffers) real_GenBuffers;
+static __typeof__(halo_glBufferData) real_BufferData;
+static __typeof__(halo_glBufferSubData) real_BufferSubData;
 
 struct layer_buffer
 {
 	unsigned char *data;
 	/* the data is someone else's memory (console_gl_buffer_alias) */
 	int aliased;
+	/* a GPU buffer with it, which draws read (the mirror's segments: drawn
+	again every frame, which as client arrays the driver copied each time) */
+	GLuint gpu;
 	/* -1 for a name made with nothing in it yet */
 	GLsizeiptr size;
 };
@@ -828,6 +851,12 @@ static void GL_APIENTRY layer_BufferSubData(GLenum target, GLintptr offset, GLsi
 	/* (an aliased buffer's upload from its own memory: already there) */
 	if (buffer->data + offset != data)
 		memcpy(buffer->data + offset, data, (size_t)size);
+	if (buffer->gpu)
+	{
+		real.BindBuffer(GL_ARRAY_BUFFER, buffer->gpu);
+		real_BufferSubData(GL_ARRAY_BUFFER, offset, size, buffer->data + offset);
+		real.BindBuffer(GL_ARRAY_BUFFER, 0);
+	}
 }
 
 /* HALO_CONSOLE_GLES2's (d3d8_gl.c's mirror of the Xbox window): the buffer
@@ -844,6 +873,17 @@ void console_gl_buffer_alias(GLenum target, void *memory, unsigned long size)
 	buffer->data = memory;
 	buffer->size = (GLsizeiptr)size;
 	buffer->aliased = 1;
+	/* (and a GPU buffer of it, empty: the renderer uploads each page before
+	the first draw from it and as the game changes it, layer_BufferSubData;
+	much of the window is not memory at all, and reading it faults) */
+	if (!buffer->gpu)
+		real_GenBuffers(1, &buffer->gpu);
+	if (buffer->gpu)
+	{
+		real.BindBuffer(GL_ARRAY_BUFFER, buffer->gpu);
+		real_BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)size, NULL, GL_STATIC_DRAW);
+		real.BindBuffer(GL_ARRAY_BUFFER, 0);
+	}
 }
 
 /* ---------- vertex arrays */
@@ -880,6 +920,17 @@ static struct layer_vertex_array *vertex_array(void)
 /* the attribute as a client array, in its buffer's memory */
 static void attribute_apply(GLuint index, const struct layer_attribute *attribute)
 {
+	struct layer_buffer *buffer = buffer_get(attribute->buffer);
+
+	counts.pointers++;
+	if (buffer && buffer->gpu)
+	{
+		real.BindBuffer(GL_ARRAY_BUFFER, buffer->gpu);
+		real.VertexAttribPointer(index, attribute->size ? attribute->size : 4,
+			attribute->type ? attribute->type : GL_FLOAT, attribute->normalized, attribute->stride, attribute->pointer);
+		return;
+	}
+	real.BindBuffer(GL_ARRAY_BUFFER, 0);
 	real.VertexAttribPointer(index, attribute->size ? attribute->size : 4,
 		attribute->type ? attribute->type : GL_FLOAT, attribute->normalized, attribute->stride,
 		buffer_pointer(attribute->buffer, attribute->pointer));
@@ -1088,7 +1139,7 @@ static void feedback_end(unsigned int units)
 		if (units & (1u << unit))
 		{
 			real.ActiveTexture(GL_TEXTURE0 + unit);
-			real.BindTexture(GL_TEXTURE_2D, unit_textures[unit][0]);
+			real.BindTexture(GL_TEXTURE_2D, unit_textures[unit][0] ? unit_textures[unit][0] : texture_white);
 		}
 	}
 	real.ActiveTexture(GL_TEXTURE0 + active_unit);
@@ -1184,6 +1235,7 @@ static GLuint shared_copy_get(GLuint name)
 	texture->applied_min = texture->applied_mag = 0;
 	halo_glUniform1i(blit_texture_uniform, 0);
 	halo_glUniform4fv(blit_rectangle_uniform, 1, whole);
+	real.BindBuffer(GL_ARRAY_BUFFER, 0);
 	real.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, corners);
 	if (!(current->enabled & 1))
 		real.EnableVertexAttribArray(0);
@@ -1208,7 +1260,7 @@ static GLuint shared_copy_get(GLuint name)
 		if (enabled[index])
 			halo_glEnable(capabilities[index]);
 	}
-	real.BindTexture(GL_TEXTURE_2D, unit_textures[0][0]);
+	real.BindTexture(GL_TEXTURE_2D, unit_textures[0][0] ? unit_textures[0][0] : texture_white);
 	/* (the texture's filter, as its sampler has it, at its next binding) */
 	sampler_apply(0);
 	real.ActiveTexture(GL_TEXTURE0 + active_unit);
@@ -1259,7 +1311,7 @@ static void shared_units_end(unsigned int moved)
 		if (moved & (1u << unit))
 		{
 			real.ActiveTexture(GL_TEXTURE0 + unit);
-			real.BindTexture(GL_TEXTURE_2D, unit_textures[unit][0]);
+			real.BindTexture(GL_TEXTURE_2D, unit_textures[unit][0] ? unit_textures[unit][0] : texture_white);
 			real.ActiveTexture(GL_TEXTURE0 + active_unit);
 		}
 	}
@@ -1307,10 +1359,14 @@ static void skin_log(GLsizei count, GLenum type, const void *indices);
 
 /* HALO_GLES2_EXPERIMENT=program:bits, for one program's draws while
 hunting a GPU hang: 1, its textures a white 1x1; 2, only the attributes the
-program reads enabled; 4, not drawn at all. experiment_begin returns what to
-put back (experiment_end). */
+program reads enabled; 4, not drawn at all; 64, drawn into one pixel (the
+scissor), for what filling costs; 128, only its first triangle, for what a
+draw costs whatever its size. Program 0 is every program.
+experiment_begin returns what to put back (experiment_end). */
 static GLuint experiment_program, experiment_white;
 static unsigned int experiment_bits;
+static GLint experiment_scissor[4];
+static GLboolean experiment_scissoring;
 
 static unsigned int experiment_begin(void)
 {
@@ -1329,7 +1385,7 @@ static unsigned int experiment_begin(void)
 			platform_log("gles2: experiment on program %u: %u", experiment_program, experiment_bits);
 		}
 	}
-	if (!experiment_bits || program_current != experiment_program)
+	if (!experiment_bits || (experiment_program && program_current != experiment_program))
 		return 0;
 	if (experiment_bits & (1 | 8 | 16 | 32))
 	{
@@ -1395,6 +1451,24 @@ static unsigned int experiment_begin(void)
 	}
 	if (experiment_bits & 4)
 		undo |= 4;
+	if (experiment_bits & 64)
+	{
+		static GLboolean (GL_APIENTRY *is_enabled)(GLenum);
+		static void (GL_APIENTRY *enable)(GLenum);
+		static void (GL_APIENTRY *scissor)(GLint, GLint, GLsizei, GLsizei);
+
+		if (!scissor)
+		{
+			is_enabled = (__typeof__(is_enabled))SDL_GL_GetProcAddress("glIsEnabled");
+			enable = (__typeof__(enable))SDL_GL_GetProcAddress("glEnable");
+			scissor = (__typeof__(scissor))SDL_GL_GetProcAddress("glScissor");
+		}
+		experiment_scissoring = is_enabled(GL_SCISSOR_TEST);
+		halo_glGetIntegerv(GL_SCISSOR_BOX, experiment_scissor);
+		enable(GL_SCISSOR_TEST);
+		scissor(0, 0, 1, 1);
+		undo |= 64;
+	}
 	return undo;
 }
 
@@ -1407,7 +1481,7 @@ static void experiment_end(unsigned int undo)
 		for (unit = 0; unit < 4; unit++)
 		{
 			real.ActiveTexture(GL_TEXTURE0 + unit);
-			real.BindTexture(GL_TEXTURE_2D, unit_textures[unit][0]);
+			real.BindTexture(GL_TEXTURE_2D, unit_textures[unit][0] ? unit_textures[unit][0] : texture_white);
 		}
 		real.ActiveTexture(GL_TEXTURE0 + active_unit);
 	}
@@ -1420,6 +1494,20 @@ static void experiment_end(unsigned int undo)
 			if (current->enabled & (1u << unit))
 				real.EnableVertexAttribArray(unit);
 		}
+	}
+	if (undo & 64)
+	{
+		static void (GL_APIENTRY *disable)(GLenum);
+		static void (GL_APIENTRY *scissor)(GLint, GLint, GLsizei, GLsizei);
+
+		if (!scissor)
+		{
+			disable = (__typeof__(disable))SDL_GL_GetProcAddress("glDisable");
+			scissor = (__typeof__(scissor))SDL_GL_GetProcAddress("glScissor");
+		}
+		scissor(experiment_scissor[0], experiment_scissor[1], experiment_scissor[2], experiment_scissor[3]);
+		if (!experiment_scissoring)
+			disable(GL_SCISSOR_TEST);
 	}
 }
 
@@ -1440,11 +1528,76 @@ static void draw_slow_check(const char *kind, GLenum mode, GLsizei count, GLenum
 	size_t length = 0;
 	GLuint index;
 
+	static long threshold = -1;
+
+	/* (HALO_GLES2_SLOW=ms: the draws past that many, a line each, for where
+	the GPU's time goes; 1 or no number, the hangs only) */
+	if (threshold < 0)
+		threshold = atol(getenv("HALO_GLES2_SLOW")) > 1 ? atol(getenv("HALO_GLES2_SLOW")) : 1000;
 	halo_glFinish();
-	took = SDL_GetTicks() - start;
-	if (took < 1000 || reported >= 20)
+	took = (SDL_GetTicksNS() - start) / 1000;
+	/* (and with a number, every draw's time by program, the most costly
+	each 10 seconds) */
+	if (threshold < 1000)
+	{
+		static unsigned long program_ms[LAYER_TRACKED], program_draws[LAYER_TRACKED];
+		static Uint64 window_start;
+		Uint64 now = SDL_GetTicks();
+
+		if (program_current < LAYER_TRACKED)
+		{
+			program_ms[program_current] += (unsigned long)took;
+			program_draws[program_current]++;
+		}
+		if (!window_start)
+			window_start = now;
+		if (now - window_start >= 10000)
+		{
+			unsigned long total = 0;
+			int rank;
+
+			for (index = 0; index < LAYER_TRACKED; index++)
+				total += program_ms[index];
+			platform_log("gles2 gpu: %lu ms of draws in %llu ms", total / 1000, (unsigned long long)(now - window_start));
+			for (rank = 0; rank < 8; rank++)
+			{
+				GLuint best = 0;
+
+				for (index = 1; index < LAYER_TRACKED; index++)
+				{
+					if (program_ms[index] > program_ms[best])
+						best = index;
+				}
+				if (!program_ms[best])
+					break;
+				platform_log("gles2 gpu:   program %u: %lu ms in %lu draws", best, program_ms[best] / 1000,
+					program_draws[best]);
+				if (getenv("HALO_GLES2_DUMP"))
+					program_dump(best, "gpu");
+				program_ms[best] = 0;
+			}
+			memset(program_ms, 0, sizeof(program_ms));
+			memset(program_draws, 0, sizeof(program_draws));
+			window_start = now;
+		}
+	}
+	/* (took in microseconds, for the draws under a millisecond) */
+	took /= 1000;
+	if ((long)took < threshold || reported >= 400)
 		return;
 	reported++;
+	if (threshold < 1000)
+	{
+		struct layer_texture *texture = texture_get(unit_textures[0][0]);
+
+		platform_log("gles2 slow: %llu ms, %s mode %u count %d, program %u, framebuffer %u, texture 0 %ux%u 0x%x",
+			(unsigned long long)took, kind, (unsigned)mode, (int)count, program_current, draw_framebuffer_seen(),
+			texture ? (unsigned)texture->width : 0, texture ? (unsigned)texture->height : 0,
+			texture ? (unsigned)texture->format : 0);
+		if (getenv("HALO_GLES2_DUMP"))
+			program_dump(program_current, "slow");
+		return;
+	}
 	current = vertex_array();
 	attributes[0] = 0;
 	for (index = 0; index < (GLuint)attribute_maximum && length + 24 < sizeof(attributes); index++)
@@ -1523,6 +1676,7 @@ static void draw_traced(const char *kind, GLenum mode, GLsizei count)
 
 static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count)
 {
+	counts.draws++;
 	Uint64 start = 0;
 
 	if (slow_checking < 0)
@@ -1530,7 +1684,7 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 	if (slow_checking)
 	{
 		halo_glFinish();
-		start = SDL_GetTicks();
+		start = SDL_GetTicksNS();
 	}
 	if (profiling)
 		profile_report();
@@ -1544,7 +1698,7 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 		{
 			unsigned int shared = shared_units_begin();
 
-			real_DrawArrays(mode, first, count);
+			real_DrawArrays(mode, first, (experiment_bits & 128) && count > 3 ? 3 : count);
 			shared_units_end(shared);
 		}
 		experiment_end(experiment);
@@ -1557,20 +1711,27 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 
 static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
+	counts.draws++;
 	Uint64 start = 0;
+	struct layer_buffer *elements;
+	const void *offset;
 
 	if (slow_checking < 0)
 		slow_checking = getenv("HALO_GLES2_SLOW") != NULL;
 	if (slow_checking)
 	{
 		halo_glFinish();
-		start = SDL_GetTicks();
+		start = SDL_GetTicksNS();
 	}
 	if (profiling)
 		profile_report();
 	if (tracing())
 		trace("draw elements mode %u count %d type 0x%x program %u", (unsigned)mode, (int)count, (unsigned)type,
 			program_current);
+	/* (indices in a buffer with a GPU copy, the mirror's, drawn from that:
+	the driver copies client indices each draw) */
+	elements = buffer_get(vertex_array()->element_buffer);
+	offset = indices;
 	indices = buffer_pointer(vertex_array()->element_buffer, indices);
 	skin_log(count, type, indices);
 	if (indices)
@@ -1582,7 +1743,19 @@ static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum ty
 		{
 			unsigned int shared = shared_units_begin();
 
-			real_DrawElements(mode, count, type, indices);
+			GLsizei drawn = (experiment_bits & 128) && count > 3 ? 3 : count;
+
+			if (elements && elements->gpu)
+			{
+				counts.gpu_indexed++;
+				real.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, elements->gpu);
+				real_DrawElements(mode, drawn, type, offset);
+			}
+			else
+			{
+				real.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+				real_DrawElements(mode, drawn, type, indices);
+			}
 			shared_units_end(shared);
 		}
 		experiment_end(experiment);
@@ -1634,6 +1807,7 @@ static void GL_APIENTRY layer_BindFramebuffer(GLenum target, GLuint framebuffer)
 	if (target == GL_FRAMEBUFFER)
 		read_framebuffer = framebuffer;
 	draw_framebuffer = framebuffer;
+	counts.framebuffers++;
 	real.BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
 }
 
@@ -1909,6 +2083,7 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 				real.DisableVertexAttribArray(index);
 		}
 	}
+	real.BindBuffer(GL_ARRAY_BUFFER, 0);
 	real.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, corners);
 	if (!(current->enabled & 1))
 		real.EnableVertexAttribArray(0);
@@ -1932,7 +2107,7 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 				real.EnableVertexAttribArray(index);
 		}
 	}
-	real.BindTexture(GL_TEXTURE_2D, unit_textures[0][0]);
+	real.BindTexture(GL_TEXTURE_2D, unit_textures[0][0] ? unit_textures[0][0] : texture_white);
 	if (active_unit != 0)
 		real.ActiveTexture(GL_TEXTURE0 + active_unit);
 	xgpu_gl_state_invalidate();
@@ -1945,7 +2120,18 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 
 		if (profiling)
 			profile_report();
-		static Uint64 period_start;
+		static Uint64 period_start, finish_ms;
+
+		/* (HALO_GLES2_FRAME_SPLIT: the GPU's share of each frame, as the time
+		a glFinish waits at its end) */
+		if (getenv("HALO_GLES2_FRAME_SPLIT"))
+		{
+			Uint64 before = SDL_GetTicks();
+
+			halo_glFinish();
+			finish_ms += SDL_GetTicks() - before;
+			now = SDL_GetTicks();
+		}
 
 		if (timed++ < 30)
 			platform_log("gles2: frame %d presented, %llu ms after the last", timed, (unsigned long long)(now - last));
@@ -1954,8 +2140,17 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 			period_start = now;
 		else if (timed > 30 && !((timed - 30) % 300))
 		{
-			platform_log("gles2: frames %d to %d took %.1f ms each", timed - 300, timed,
-				(double)(now - period_start) / 300.0);
+			platform_log("gles2: frames %d to %d took %.1f ms each; a frame's calls: %lu draws, %lu programs, "
+				"%lu texture binds, %lu sampler states, %lu uniforms, %lu attribute pointers, %lu framebuffers, %lu drawn from GPU indices; %lu links and %lu compiles in all",
+				timed - 300, timed, (double)(now - period_start) / 300.0, counts.draws / 300,
+				counts.programs / 300, counts.texture_binds / 300, counts.texture_parameters / 300,
+				counts.uniforms / 300, counts.pointers / 300, counts.framebuffers / 300,
+				counts.gpu_indexed / 300, counts.links,
+				counts.compiles);
+			if (finish_ms)
+				platform_log("gles2: of which %.1f ms waiting for the GPU at the frame's end", (double)finish_ms / 300.0);
+			finish_ms = 0;
+			memset(&counts, 0, sizeof(counts));
 			period_start = now;
 		}
 		last = now;
@@ -2805,6 +3000,21 @@ static char *shader_translate(struct layer_shader *shader, const char *source)
 	if (body.buffer)
 		replace_text(&result, body.buffer, text_replacements);
 	free(body.buffer);
+	/* (HALO_GLES2_MEDIUMP: the pixel shaders at medium precision, to see
+	what it saves the GPU) */
+	if (fragment && result.buffer && getenv("HALO_GLES2_MEDIUMP"))
+	{
+		static const char *const medium[] = {
+			"precision highp float;", "precision mediump float;",
+			"precision highp int;", "precision mediump int;",
+			NULL,
+		};
+		struct text lowered = { 0 };
+
+		replace_text(&lowered, result.buffer, medium);
+		free(result.buffer);
+		result = lowered;
+	}
 	if (!fragment && result.buffer)
 	{
 		/* (HALO_GLES2_NO_FOLD: as written, to compare) */
@@ -2823,12 +3033,16 @@ static char *shader_translate(struct layer_shader *shader, const char *source)
 	return result.buffer;
 }
 
+static void specialized_forget(GLuint fragment);
+
 static GLuint GL_APIENTRY layer_CreateShader(GLenum type)
 {
 	GLuint shader = real.CreateShader(type);
 
 	if (shader && shader < LAYER_TRACKED)
 	{
+		/* (a name used again is another shader: no copy made of the last) */
+		specialized_forget(shader);
 		free(shaders[shader].source);
 		memset(&shaders[shader], 0, sizeof(shaders[shader]));
 		shaders[shader].type = type;
@@ -2890,6 +3104,7 @@ static void GL_APIENTRY layer_CompileShader(GLuint shader)
 			fclose(file);
 		}
 	}
+	counts.compiles++;
 	real.CompileShader(shader);
 	halo_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
 	if (!compiled && reported < 6 && shader < LAYER_TRACKED && shaders[shader].source)
@@ -2920,6 +3135,142 @@ static void GL_APIENTRY layer_AttachShader(GLuint program, GLuint shader)
 	else if (program < LAYER_TRACKED && shader < LAYER_TRACKED && shaders[shader].type == GL_FRAGMENT_SHADER)
 		program_fragment_shaders[program] = shader;
 	real.AttachShader(program, shader);
+}
+
+/* The pixel shaders divide each projected stage's texture coordinate by its
+w (nv2a_psh.c: (vec4(xT0.xyz / (xT0.w != 0.0 ? xT0.w : 1.0), 1.0))), which
+on the box is a third of a busy shader's time: 14 ms a full-screen pass, 10
+without it. A vertex shader seldom writes a coordinate's w (4 of 69 in a10),
+which then stays 1.0, and the divide does nothing. At a program's link the
+layer looks at which its vertex shader writes, and the program gets a copy
+of the pixel shader without the others' divides (kept for the next program
+with the same pair of needs). */
+struct specialized
+{
+	GLuint fragment;
+	unsigned int mask;
+	GLuint shader;
+};
+
+static struct specialized specialized[1024];
+static int specialized_count;
+
+static void specialized_forget(GLuint fragment)
+{
+	int index = 0;
+
+	while (index < specialized_count)
+	{
+		if (specialized[index].fragment == fragment)
+			specialized[index] = specialized[--specialized_count];
+		else
+			index++;
+	}
+}
+
+/* the coordinates whose w the vertex shader writes (a bit each, oT0 to oT3) */
+static unsigned int texture_w_written(const char *source)
+{
+	unsigned int written = 0;
+	const char *line = source;
+
+	while (line && *line)
+	{
+		const char *end = strchr(line, '\n');
+		const char *text = line;
+		size_t length = end ? (size_t)(end - line) : strlen(line);
+
+		while (*text == ' ' || *text == '\t')
+			text++;
+		if (text[0] == 'o' && text[1] == 'T' && text[2] >= '0' && text[2] <= '3')
+		{
+			const char *equals = strstr(text, " = ");
+			const char *swizzle = text + 3;
+
+			/* "oT1.w = ", "oT2.xw = ", "oT3 = ": the w written */
+			if (equals && equals < line + length &&
+				(swizzle == equals || (*swizzle == '.' && memchr(swizzle, 'w', (size_t)(equals - swizzle)))))
+			{
+				written |= 1u << (text[2] - '0');
+			}
+		}
+		line = end ? end + 1 : line + length;
+	}
+	return written;
+}
+
+static GLuint fragment_specialized(GLuint fragment, unsigned int unwritten)
+{
+	static void (GL_APIENTRY *get_shaderiv)(GLuint, GLenum, GLint *);
+	struct text text = { 0 };
+	const char *pairs[9];
+	char divides[4][96], plain[4][8];
+	int index, count = 0;
+	GLuint shader;
+	GLint compiled = 0;
+
+	for (index = 0; index < specialized_count; index++)
+	{
+		if (specialized[index].fragment == fragment && specialized[index].mask == unwritten)
+			return specialized[index].shader;
+	}
+	for (index = 0; index < 4; index++)
+	{
+		if (!(unwritten & (1u << index)))
+			continue;
+		snprintf(divides[index], sizeof(divides[index]), "(vec4(xT%d.xyz / (xT%d.w != 0.0 ? xT%d.w : 1.0), 1.0))", index,
+			index, index);
+		snprintf(plain[index], sizeof(plain[index]), "xT%d", index);
+		pairs[count * 2] = divides[index];
+		pairs[count * 2 + 1] = plain[index];
+		count++;
+	}
+	pairs[count * 2] = NULL;
+	/* (none to take out: as it is) */
+	if (!count || (!strstr(shaders[fragment].source, "xT0.w != 0.0") && !strstr(shaders[fragment].source, "xT1.w != 0.0") &&
+		!strstr(shaders[fragment].source, "xT2.w != 0.0") && !strstr(shaders[fragment].source, "xT3.w != 0.0")))
+	{
+		return 0;
+	}
+	replace_text(&text, shaders[fragment].source, pairs);
+	if (!text.buffer || !strcmp(text.buffer, shaders[fragment].source))
+	{
+		free(text.buffer);
+		return 0;
+	}
+	shader = real.CreateShader(GL_FRAGMENT_SHADER);
+	if (!shader || shader >= LAYER_TRACKED)
+	{
+		free(text.buffer);
+		return 0;
+	}
+	{
+		const GLchar *source = text.buffer;
+
+		real.ShaderSource(shader, 1, &source, NULL);
+	}
+	counts.compiles++;
+	real.CompileShader(shader);
+	if (!get_shaderiv)
+		get_shaderiv = (__typeof__(get_shaderiv))SDL_GL_GetProcAddress("glGetShaderiv");
+	get_shaderiv(shader, GL_COMPILE_STATUS, &compiled);
+	if (!compiled)
+	{
+		LAYER_ONCE("a pixel shader without its divides does not compile: the divides are kept");
+		free(text.buffer);
+		return 0;
+	}
+	free(shaders[shader].source);
+	shaders[shader].source = text.buffer;
+	shaders[shader].type = GL_FRAGMENT_SHADER;
+	if (specialized_count < (int)(sizeof(specialized) / sizeof(*specialized)))
+	{
+		specialized[specialized_count].fragment = fragment;
+		specialized[specialized_count].mask = unwritten;
+		specialized[specialized_count].shader = shader;
+		specialized_count++;
+	}
+	return shader;
 }
 
 /* a program's two shaders, as given the driver, in HALO_GLES2_DUMP */
@@ -2976,6 +3327,25 @@ static void GL_APIENTRY layer_LinkProgram(GLuint program)
 					vertex->attribute_locations[index], attribute_maximum);
 		}
 	}
+	/* (its pixel shader without the divides its vertex shader makes no use
+	for, fragment_specialized) */
+	if (program < LAYER_TRACKED && program_vertex_shaders[program] && program_fragment_shaders[program] &&
+		shaders[program_vertex_shaders[program]].source && shaders[program_fragment_shaders[program]].source &&
+		!getenv("HALO_GLES2_KEEP_DIVIDES"))
+	{
+		static void (GL_APIENTRY *detach)(GLuint, GLuint);
+		unsigned int unwritten = ~texture_w_written(shaders[program_vertex_shaders[program]].source) & 15u;
+		GLuint copy = unwritten ? fragment_specialized(program_fragment_shaders[program], unwritten) : 0;
+
+		if (!detach)
+			detach = (__typeof__(detach))SDL_GL_GetProcAddress("glDetachShader");
+		if (copy && detach)
+		{
+			detach(program, program_fragment_shaders[program]);
+			real.AttachShader(program, copy);
+		}
+	}
+	counts.links++;
 	real.LinkProgram(program);
 	halo_glGetProgramiv(program, GL_LINK_STATUS, &linked);
 	/* (a name used again is another program: its c[] is looked up anew) */
@@ -3083,6 +3453,7 @@ static void GL_APIENTRY layer_Uniform4fv(GLint location, GLsizei count, const GL
 	struct constant_split *split;
 	GLint first, index;
 
+	counts.uniforms++;
 	if (location < CONSTANTS_VIRTUAL_LOCATION || location >= CONSTANTS_VIRTUAL_LOCATION + 192)
 	{
 		real_Uniform4fv(location, count, values);
@@ -3173,6 +3544,7 @@ static void skin_log(GLsizei count, GLenum type, const void *indices)
 static void GL_APIENTRY layer_UseProgram(GLuint program)
 {
 	program_current = program;
+	counts.programs++;
 	real.UseProgram(program);
 }
 
@@ -3267,7 +3639,7 @@ static void profile_report(void)
 {
 	static Uint64 last;
 	Uint64 now = SDL_GetTicks();
-	unsigned int best[12], best_count[12], slot, index, total = profile_total;
+	unsigned int best[30], best_count[30], slot, index, total = profile_total;
 
 	if (now - last < 9000)
 		return;
@@ -3278,21 +3650,42 @@ static void profile_report(void)
 	{
 		unsigned int count = profile_counts[slot];
 
-		for (index = 0; index < 12; index++)
+		for (index = 0; index < 30; index++)
 		{
 			if (count > best_count[index])
 			{
-				memmove(&best[index + 1], &best[index], (11 - index) * sizeof(*best));
-				memmove(&best_count[index + 1], &best_count[index], (11 - index) * sizeof(*best_count));
+				memmove(&best[index + 1], &best[index], (29 - index) * sizeof(*best));
+				memmove(&best_count[index + 1], &best_count[index], (29 - index) * sizeof(*best_count));
 				best[index] = profile_pcs[slot];
 				best_count[index] = count;
 				break;
 			}
 		}
 	}
+	/* (HALO_GLES2_PROFILE=file: every pc of the window there, for a profile
+by function off the box) */
+	{
+		const char *path = getenv("HALO_GLES2_PROFILE");
+		FILE *file = path && strcmp(path, "1") ? fopen(path, "w") : NULL;
+
+		if (file)
+		{
+			fprintf(file, "samples %u\n", total);
+			for (slot = 0; slot < PROFILE_SLOTS; slot++)
+			{
+				if (profile_counts[slot])
+					fprintf(file, "%08x %u\n", profile_pcs[slot], profile_counts[slot]);
+			}
+			fclose(file);
+		}
+	}
+	/* (the last ten seconds only: counted again from nothing) */
 	platform_log("gles2 profile: %u samples", total);
-	for (index = 0; index < 12 && best_count[index]; index++)
+	for (index = 0; index < 30 && best_count[index]; index++)
 		platform_log("gles2 profile: %08x %u", best[index], best_count[index]);
+	memset((void *)profile_counts, 0, sizeof(profile_counts));
+	memset((void *)profile_pcs, 0, sizeof(profile_pcs));
+	profile_total = 0;
 }
 
 /* (its own thread: the game's may be the one stuck) */
@@ -3359,6 +3752,32 @@ static void profile_start(void)
 #define LAYER_SAVE(name) real.name = halo_gl##name
 #define LAYER_REPLACE(name) halo_gl##name = layer_##name
 
+/* The layer binds a GPU buffer for each attribute pointer and indexed draw
+from one; the driver's binding is kept, and the same again not passed on
+(HALO_GLES2_NO_STATE_CACHE, not kept). */
+static struct
+{
+	__typeof__(halo_glBindBuffer) BindBuffer;
+	GLuint array_buffer, element_buffer;
+} driver;
+
+static void GL_APIENTRY driver_BindBuffer(GLenum target, GLuint buffer)
+{
+	if (target == GL_ARRAY_BUFFER)
+	{
+		if (buffer == driver.array_buffer)
+			return;
+		driver.array_buffer = buffer;
+	}
+	else if (target == GL_ELEMENT_ARRAY_BUFFER)
+	{
+		if (buffer == driver.element_buffer)
+			return;
+		driver.element_buffer = buffer;
+	}
+	driver.BindBuffer(target, buffer);
+}
+
 int console_gles2_layer(void)
 {
 	GLint unit;
@@ -3382,6 +3801,11 @@ int console_gles2_layer(void)
 	LAYER_SAVE(EnableVertexAttribArray);
 	LAYER_SAVE(DisableVertexAttribArray);
 	LAYER_SAVE(VertexAttribPointer);
+	if (real.BindBuffer && !getenv("HALO_GLES2_NO_STATE_CACHE"))
+	{
+		driver.BindBuffer = real.BindBuffer;
+		real.BindBuffer = driver_BindBuffer;
+	}
 	LAYER_SAVE(CreateShader);
 	LAYER_SAVE(ShaderSource);
 	LAYER_SAVE(CompileShader);
@@ -3437,6 +3861,9 @@ int console_gles2_layer(void)
 	LAYER_REPLACE(InvalidateFramebuffer);
 	LAYER_REPLACE(RenderbufferStorageMultisample);
 	LAYER_REPLACE(BindBuffer);
+	real_GenBuffers = halo_glGenBuffers;
+	real_BufferData = halo_glBufferData;
+	real_BufferSubData = halo_glBufferSubData;
 	LAYER_REPLACE(GenBuffers);
 	LAYER_REPLACE(DeleteBuffers);
 	LAYER_REPLACE(BufferData);
@@ -3478,6 +3905,23 @@ int console_gles2_layer(void)
 	if (attribute_maximum > LAYER_ATTRIBUTES)
 		attribute_maximum = LAYER_ATTRIBUTES;
 	vertex_arrays[0].used = 1;
+	{
+		static const unsigned char white[4] = { 255, 255, 255, 255 };
+
+		real_GenTextures(1, &texture_white);
+		for (unit = 0; unit < 8; unit++)
+		{
+			real.ActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+			real.BindTexture(GL_TEXTURE_2D, texture_white);
+			if (!unit)
+			{
+				real.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+				real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+				real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			}
+		}
+		real.ActiveTexture(GL_TEXTURE0);
+	}
 	for (unit = 0; unit < LAYER_TEXTURE_UNITS; unit++)
 		unit_samplers[unit] = 0;
 	platform_log("gles2: ES 2 filled out to ES 3 for the renderer (%d vertex attributes)", attribute_maximum);

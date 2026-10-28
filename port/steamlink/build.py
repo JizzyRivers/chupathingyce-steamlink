@@ -55,7 +55,10 @@ STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
                           "-DHALO_CONSOLE_AUDIO_OUTPUT",
                           # the high-res HUD decoded as it is drawn: 40 MB
                           # less in a level
-                          "-DHALO_CONSOLE_HUD_ON_DEMAND"]
+                          "-DHALO_CONSOLE_HUD_ON_DEMAND",
+                          # linear resampling and no reverb by default: the
+                          # sinc resampler took 37% of the box's core
+                          "-DHALO_CONSOLE_LIGHT_AUDIO"]
 # the port's own platform units
 STEAMLINK_SOURCES = ["src/gles2_layer.c", "src/steamlink_audio.c"]
 # the sdk's gcc, for its crt files and libgcc (clang finds glibc in the root
