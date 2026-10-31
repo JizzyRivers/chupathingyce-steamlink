@@ -181,6 +181,70 @@ static GLuint sampler_next = 1;
 static GLuint active_unit;
 /* the textures bound to each unit: [0] 2D, [1] cube */
 static GLuint unit_textures[LAYER_TEXTURE_UNITS][2];
+
+/* HALO_GLES2_MERGE_STATS: what each draw changes from the one before, for how
+many draws could be merged (each costs the driver about half a millisecond
+whatever its size). Blend, depth and the rest of the render state are not
+looked at, so "nothing" and the others are the most that could merge. A
+uniform counts only when its value changes. */
+static struct
+{
+	unsigned long nothing, pointers, uniforms, textures, programs, framebuffers, uniform_writes, uniform_repeats;
+} merge_stats;
+static int merge_stats_on = -1;
+static int merge_changed_pointers, merge_changed_uniforms, merge_changed_framebuffer;
+static GLuint merge_program, merge_textures[LAYER_TEXTURE_UNITS][2];
+static GLfloat (*merge_constants[LAYER_TRACKED])[4];
+
+static void merge_stats_draw(GLuint program)
+{
+	int textures_changed;
+
+	if (merge_stats_on < 0)
+		merge_stats_on = getenv("HALO_GLES2_MERGE_STATS") != NULL;
+	if (!merge_stats_on)
+		return;
+	textures_changed = memcmp(merge_textures, unit_textures, sizeof(unit_textures)) != 0;
+	if (merge_changed_framebuffer)
+		merge_stats.framebuffers++;
+	else if (program != merge_program)
+		merge_stats.programs++;
+	else if (textures_changed)
+		merge_stats.textures++;
+	else if (merge_changed_uniforms)
+		merge_stats.uniforms++;
+	else if (merge_changed_pointers)
+		merge_stats.pointers++;
+	else
+		merge_stats.nothing++;
+	merge_program = program;
+	memcpy(merge_textures, unit_textures, sizeof(unit_textures));
+	merge_changed_pointers = merge_changed_uniforms = merge_changed_framebuffer = 0;
+}
+
+/* the constants of a program being written, against what it has */
+static void merge_stats_uniform(GLuint program, GLint first, GLsizei count, const GLfloat *values)
+{
+	GLint index;
+
+	if (merge_stats_on <= 0 || program >= LAYER_TRACKED)
+		return;
+	if (!merge_constants[program])
+		merge_constants[program] = calloc(192, sizeof(GLfloat[4]));
+	if (!merge_constants[program])
+		return;
+	for (index = 0; index < count && first + index < 192; index++)
+	{
+		merge_stats.uniform_writes++;
+		if (memcmp(merge_constants[program][first + index], values + index * 4, sizeof(GLfloat[4])))
+		{
+			memcpy(merge_constants[program][first + index], values + index * 4, sizeof(GLfloat[4]));
+			merge_changed_uniforms = 1;
+		}
+		else
+			merge_stats.uniform_repeats++;
+	}
+}
 static GLuint unit_samplers[LAYER_TEXTURE_UNITS];
 
 static struct layer_texture *texture_get(GLuint texture)
@@ -932,6 +996,7 @@ static void attribute_apply(GLuint index, const struct layer_attribute *attribut
 	struct layer_buffer *buffer = buffer_get(attribute->buffer);
 
 	counts.pointers++;
+	merge_changed_pointers = 1;
 	if (buffer && buffer->gpu)
 	{
 		real.BindBuffer(GL_ARRAY_BUFFER, buffer->gpu);
@@ -1686,6 +1751,7 @@ static void draw_traced(const char *kind, GLenum mode, GLsizei count)
 
 static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count)
 {
+	merge_stats_draw(program_current);
 	counts.draws++;
 	draws_total++;
 	Uint64 start = 0;
@@ -1722,6 +1788,7 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 
 static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
+	merge_stats_draw(program_current);
 	counts.draws++;
 	draws_total++;
 	Uint64 start = 0;
@@ -1820,6 +1887,7 @@ static void GL_APIENTRY layer_BindFramebuffer(GLenum target, GLuint framebuffer)
 		read_framebuffer = framebuffer;
 	draw_framebuffer = framebuffer;
 	counts.framebuffers++;
+	merge_changed_framebuffer = 1;
 	real.BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
 }
 
@@ -2161,6 +2229,15 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 				counts.compiles);
 			if (finish_ms)
 				platform_log("gles2: of which %.1f ms waiting for the GPU at the frame's end", (double)finish_ms / 300.0);
+			if (merge_stats_on > 0)
+			{
+				platform_log("gles2: a frame's draws by what changed first: framebuffer %lu, program %lu, textures %lu, "
+					"uniforms %lu, vertices only %lu, nothing %lu; %lu constants written, %lu to the value they had",
+					merge_stats.framebuffers / 300, merge_stats.programs / 300, merge_stats.textures / 300,
+					merge_stats.uniforms / 300, merge_stats.pointers / 300, merge_stats.nothing / 300,
+					merge_stats.uniform_writes / 300, merge_stats.uniform_repeats / 300);
+				memset(&merge_stats, 0, sizeof(merge_stats));
+			}
 			finish_ms = 0;
 			memset(&counts, 0, sizeof(counts));
 			period_start = now;
@@ -3603,6 +3680,7 @@ static void GL_APIENTRY layer_Uniform4fv(GLint location, GLsizei count, const GL
 	first = location - CONSTANTS_VIRTUAL_LOCATION;
 	if (count > 192 - first)
 		count = 192 - first;
+	merge_stats_uniform(program_current, first, count, values);
 	/* the block's, together */
 	if (split->bones >= 0 && first + count > BONES_FIRST && first < BONES_FIRST + BONES_COUNT)
 	{

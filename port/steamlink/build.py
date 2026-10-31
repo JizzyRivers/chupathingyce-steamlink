@@ -31,12 +31,12 @@ from typing import Any, List, Optional
 
 from tools.embed_assets import hud_assets_build, hud_configure_inputs, ui_fonts_build
 from tools.console_build import console_defines
-from tools.linux_build import Linux32Units, _load_port_config, compile_launcher, linux32_objects
+from tools.linux_build import Linux32Units, _load_port_config, compile_launcher, linux32_objects, lto_flags
 
-# the box's processor: a 1 GHz ARMv7 core with NEON (VFPv3, no fused
-# multiply-add), hard float as the sdk's glibc is
+# the box's processor: a 1 GHz Cortex-A9 (part 0xc09 in /proc/cpuinfo) with
+# NEON (VFPv3, no fused multiply-add), hard float as the sdk's glibc is
 STEAMLINK_TRIPLE = "armv7a-linux-gnueabihf"
-STEAMLINK_INSTRUCTION_SET = ["-march=armv7-a", "-mfpu=neon", "-mfloat-abi=hard"]
+STEAMLINK_INSTRUCTION_SET = ["-mcpu=cortex-a9", "-mfpu=neon", "-mfloat-abi=hard"]
 # the game's char is MSVC's, signed (ARM's is unsigned): as the arm64 server.
 # No VFP registers for what is not floating point: clang copies a structure
 # of floats with vldr, which faults on the 2-byte aligned ones in a map's
@@ -167,13 +167,16 @@ def generate(n: Any, sln: Any, port: Any) -> None:
         # (ES 3's headers, Khronos', for its names: the sdk has ES 2's)
         include_flags=[f"-I{_posix(port.path('include'))}", f"-I{_posix(sdl / 'include')}"],
     )
-    objects = linux32_objects(n, units, build_dir / "obj", [], [])
+    # (the whole game optimised as one module when it is linked, as on the
+    # desktop: the box's frame is mostly its CPU's)
+    lto_cflags, lto_ldflags = lto_flags(steamlink_sln, build_dir / "thinlto-cache")
+    objects = linux32_objects(n, units, build_dir / "obj", lto_cflags, [])
     n.build(
         outputs=output,
         rule="steamlink_link",
         inputs=objects,
         variables={
-            "ldflags": " ".join([*target, *STEAMLINK_INSTRUCTION_SET, "-fuse-ld=lld", "-no-pie", "-g",
+            "ldflags": " ".join([*target, *STEAMLINK_INSTRUCTION_SET, *lto_ldflags, "-fuse-ld=lld", "-no-pie", "-g",
                                  f"-L{_posix(sdl / 'lib')}"]),
             "libs": " ".join(f"-l{library}" for library in STEAMLINK_LIBRARIES),
         },
