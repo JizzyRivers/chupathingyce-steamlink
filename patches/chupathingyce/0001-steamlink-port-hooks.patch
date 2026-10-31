@@ -1,8 +1,8 @@
 diff --git a/port/linux/include/halo_console_features.h b/port/linux/include/halo_console_features.h
-index adc0e7f..f01ec83 100644
+index adc0e7f..dcb67d5 100644
 --- a/port/linux/include/halo_console_features.h
 +++ b/port/linux/include/halo_console_features.h
-@@ -105,6 +105,34 @@ HALO_CONSOLE_XBOX_RENDER_SIZES
+@@ -105,6 +105,38 @@ HALO_CONSOLE_XBOX_RENDER_SIZES
  	the Xbox's texture cache and the Xbox's structure surfaces and dynamic
  	triangles in a frame (halo_port_capacity.h), on a console whose build
  	otherwise has the desktop's
@@ -33,7 +33,11 @@ index adc0e7f..f01ec83 100644
 +	console_performance_view_distance, how far the camera sees (0 for as
 +	far as the level does: render.c fogs and clips the view at it), and
 +	console_performance_model_detail, what a model's size on the screen is
-+	multiplied by when its detail is chosen (1 for the game's own: models.c)
++	multiplied by when its detail is chosen (1 for the game's own: models.c),
++	and console_performance_sky, console_performance_object_transparents,
++	console_performance_decoration_distance and
++	console_performance_hud_frames, what else it leaves out (render_sky.c,
++	render_objects.c, hud_draw.c)
  HALO_CONSOLE_WAIT_POLL
  	a console whose system must be served by the thread that runs the game
  	(the Wii U's HOME button): console_wait_poll, defined by the port, is
@@ -1191,7 +1195,7 @@ index dd9892a..fbc62d4 100644
  #endif
  	xgpu_text_append(&text, "%s", shader_prologue);
 diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
-index ba0621a..05c066e 100644
+index ba0621a..acd0386 100644
 --- a/port/linux/src/port_config.c
 +++ b/port/linux/src/port_config.c
 @@ -236,6 +236,8 @@ static const struct config_setting config_settings[] =
@@ -1211,7 +1215,7 @@ index ba0621a..05c066e 100644
  	{ "debug.gpu_profile", _config_boolean, "false", "HALO_GPU_PROFILE", _environment_set_is_true, _platform_android,
  		"Every 300 frames, log the GPU's time by part of the frame (the sky, the\n"
  		"objects, the fog...) and what a frame asks of it. Takes effect the next start." },
-@@ -373,6 +376,25 @@ static const struct config_setting config_settings[] =
+@@ -373,6 +376,37 @@ static const struct config_setting config_settings[] =
  	{ "display.anisotropic_filtering", _config_integer, "0", "HALO_ANISOTROPIC_FILTERING", _environment_value,
  		_platform_all,
  		"Sharper textures at a slant: 0 (off, the Xbox's), 2, 4, 8 or 16." },
@@ -1224,7 +1228,7 @@ index ba0621a..05c066e 100644
 +		_platform_all,
 +		"The lines the picture is drawn with in performance mode, scaled up to the screen: 480 is the game's own,\n"
 +		"240 a quarter of the pixels." },
-+	{ "display.performance_view_distance", _config_real, "40.0", "HALO_PERFORMANCE_VIEW_DISTANCE",
++	{ "display.performance_view_distance", _config_real, "60.0", "HALO_PERFORMANCE_VIEW_DISTANCE",
 +		_environment_value, _platform_all,
 +		"How far performance mode sees, in the game's units (about 3 m): fog thickens to the distance and nothing\n"
 +		"is drawn beyond it, as the game does with its own thick fog, outside cutscenes. 0 sees as far as the level\n"
@@ -1233,11 +1237,23 @@ index ba0621a..05c066e 100644
 +		_platform_all,
 +		"What performance mode multiplies a model's size on the screen by when it chooses its detail: smaller goes\n"
 +		"to coarser geometry sooner and leaves the smallest models out. 1 is the game's own." },
++	{ "display.performance_object_transparents", _config_boolean, "false", "HALO_PERFORMANCE_OBJECT_TRANSPARENTS",
++		_environment_value, _platform_all,
++		"Whether performance mode draws the transparent parts of the level's objects, as glass and glows." },
++	{ "display.performance_sky", _config_boolean, "false", "HALO_PERFORMANCE_SKY", _environment_value, _platform_all,
++		"Whether performance mode draws the sky, outside cutscenes: without it the fog's color fills in." },
++	{ "display.performance_decoration_distance", _config_real, "1.0", "HALO_PERFORMANCE_DECORATION_DISTANCE",
++		_environment_value, _platform_all,
++		"How far performance mode draws scenery nothing can touch, as plants, in the game's units, outside cutscenes. "
++		"0 draws it as far as everything else." },
++	{ "display.performance_hud_frames", _config_boolean, "false", "HALO_PERFORMANCE_HUD_FRAMES", _environment_value,
++		_platform_all,
++		"Whether performance mode draws the HUD's frames and backgrounds, its static pictures." },
 +#endif
  	{ "display.full_model_detail", _config_boolean, "false", "HALO_FULL_MODEL_DETAIL", _environment_value,
  		_platform_all,
  		"Draw every model at full detail at any distance." },
-@@ -484,9 +506,19 @@ static const struct config_setting config_settings[] =
+@@ -484,9 +518,19 @@ static const struct config_setting config_settings[] =
  		"Binaural 3D sound for headphones (HRTF): \"off\", \"on\", or \"auto\" for\n"
  		"on when the output's name says it is headphones. Stereo output only." },
  
@@ -1530,6 +1546,36 @@ index a560c4e..4a3cbef 100644
  	put its reals after a short): allocations start on 4 bytes there; the
  	Xbox's layout is kept elsewhere */
  	{
+diff --git a/source/interface/hud_draw.c b/source/interface/hud_draw.c
+index 16ffc68..0d39780 100644
+--- a/source/interface/hud_draw.c
++++ b/source/interface/hud_draw.c
+@@ -1422,6 +1422,11 @@ void hud_zoomed_layout_end(
+ }
+ 
+ #endif
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++/* port: whether performance mode keeps the HUD's frames and backgrounds */
++boolean console_performance_hud_frames(void);
++#endif
++
+ void hud_draw_static_element(
+ 	short local_player_index,
+ 	struct hud_absolute_placement_definition const *absolute_placement,
+@@ -1435,6 +1440,13 @@ void hud_draw_static_element(
+ 	struct bitmap_data *bitmap;
+ 	short overlay_index;
+ 
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++	if (!console_performance_hud_frames())
++	{
++		return;
++	}
++#endif
++
+ 	csmemset(stack_buffer, 0x62, sizeof(stack_buffer));
+ 
+ 	bitmap_group = bitmap_group_get(
 diff --git a/source/models/model_animations.c b/source/models/model_animations.c
 index e766f9c..74ba14f 100644
 --- a/source/models/model_animations.c
@@ -1656,6 +1702,108 @@ index 41bef0e..89f8d79 100644
  	if (render.fog.atmospheric_maximum_density == 1.0f &&
  		render.fog.atmospheric_maximum_distance != 0.0f)
  	{
+diff --git a/source/render/render_objects.c b/source/render/render_objects.c
+index ba0b88c..4eed2b6 100644
+--- a/source/render/render_objects.c
++++ b/source/render/render_objects.c
+@@ -289,6 +289,14 @@ boolean debug_inactive_objects = FALSE;
+ 
+ static boolean reported_rendered_object_overflow = FALSE;
+ 
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++/* port: whether performance mode keeps the transparent parts of the level's
++objects (not the sky's, nor the first-person weapon's), and how far it draws
++scenery nothing can touch */
++boolean console_performance_object_transparents(void);
++real console_performance_decoration_distance(void);
++#endif
++
+ /* ---------- public code */
+ 
+ void render_objects_initialize(
+@@ -372,7 +380,18 @@ void render_objects(
+ 		}
+ 		else
+ 		{
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++			boolean transparents = rasterizer_debug_options.draw_model_transparent_geometry;
++
++			if (!console_performance_object_transparents())
++			{
++				rasterizer_debug_options.draw_model_transparent_geometry = FALSE;
++			}
+ 			process_rendered_objects(&data);
++			rasterizer_debug_options.draw_model_transparent_geometry = transparents;
++#else
++			process_rendered_objects(&data);
++#endif
+ 		}
+ 
+ 		first_person_pass = !first_person_pass;
+@@ -456,6 +475,33 @@ static void find_rendered_objects(
+ 		reported_rendered_object_overflow = TRUE;
+ 	}
+ 
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++	/* port: scenery nothing can touch, as plants, not drawn past a distance */
++	{
++		real distance = console_performance_decoration_distance();
++
++		if (distance > 0.f)
++		{
++			short i, kept = 0;
++
++			for (i = 0; i < render_object_globals.rendered_object_count; i++)
++			{
++				long object_index = render_object_globals.rendered_object_indices[i];
++				struct object_datum *object = object_get(object_index);
++
++				if (!TEST_FLAG(_object_mask_scenery, object->object.type) ||
++					object_definition_get(object->definition_index)->object.collision_model.index != NONE ||
++					distance_squared3d(&object->object.bounding_sphere_center, &render.camera.position) <
++						distance * distance)
++				{
++					render_object_globals.rendered_object_indices[kept++] = object_index;
++				}
++			}
++			render_object_globals.rendered_object_count = kept;
++		}
++	}
++#endif
++
+ 	return;
+ }
+ 
+diff --git a/source/render/render_sky.c b/source/render/render_sky.c
+index a1ff875..ec8ac1a 100644
+--- a/source/render/render_sky.c
++++ b/source/render/render_sky.c
+@@ -83,6 +83,11 @@ static void render_sky_data_error(
+ 
+ static real render_sky_globals[MAXIMUM_SKIES_PER_SCENARIO] = {0.f};
+ 
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++/* port: whether performance mode keeps the sky */
++boolean console_performance_sky(void);
++#endif
++
+ /* ---------- public code */
+ 
+ void render_sky(
+@@ -99,6 +104,13 @@ void render_sky(
+ 	struct animation_graph *animation_graph;
+ 	short i;
+ 
++#ifdef HALO_CONSOLE_PERFORMANCE_MODE
++	if (!console_performance_sky())
++	{
++		return;
++	}
++#endif
++
+ 	if (render.visible_sky_model)
+ 	{
+ 		match_assert(
 diff --git a/tools/linux_build.py b/tools/linux_build.py
 index a84ceea..5bc7a0c 100644
 --- a/tools/linux_build.py

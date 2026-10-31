@@ -21,6 +21,13 @@ away). Models count as half their size on the screen when their detail is
 chosen (display.performance_model_detail; models.c asks
 console_performance_model_detail, as often as it draws one).
 
+Past that, what a frame at Bloodgulch's spawn gives up: the sky, which the
+fog's color fills in (render_sky.c), the transparent parts of the level's
+objects (render_objects.c), scenery nothing can touch, as plants (the same)
+and the HUD's frames and backgrounds (hud_draw.c), each a setting of its own
+and all kept in a cutscene. The driver's own share is launch.sh's: the shader
+compiler's load-time constants, worked out again at every draw, are off.
+
 Holding Back and pressing down on the d-pad (or F9) switches it, with a
 line on the screen (steamlink_performance_switch.c reads them: the game's
 headers and the system's do not meet in one file). The game's own flags
@@ -30,6 +37,7 @@ it goes off.
 */
 
 #include "cseries.h"
+#include "cutscene/cinematics.h"
 #include "interface/terminal.h"
 #include "rasterizer/rasterizer_console_vars.h"
 
@@ -42,6 +50,10 @@ void steamlink_performance_update(int switched);
 long console_performance_lines(void);
 real console_performance_view_distance(void);
 real console_performance_model_detail(void);
+boolean console_performance_object_transparents(void);
+boolean console_performance_sky(void);
+real console_performance_decoration_distance(void);
+boolean console_performance_hud_frames(void);
 
 static struct
 {
@@ -115,6 +127,66 @@ real console_performance_model_detail(void)
 		detail = (real)config_real("display.performance_model_detail");
 	}
 	return detail;
+}
+
+/* a setting read once a change of the settings */
+static boolean performance_setting(const char *name, unsigned long *read_at, boolean *value)
+{
+	if (*read_at != config_changes())
+	{
+		*read_at = config_changes();
+		*value = config_boolean(name) != 0;
+	}
+	return *value;
+}
+
+/* whether the level's objects draw their transparent parts (a cutscene
+keeps them, framed for what is close) */
+boolean console_performance_object_transparents(void)
+{
+	static unsigned long read_at = (unsigned long)-1;
+	static boolean value = TRUE;
+
+	performance_start();
+	return !performance_on || cinematic_in_progress() ||
+		performance_setting("display.performance_object_transparents", &read_at, &value);
+}
+
+boolean console_performance_sky(void)
+{
+	static unsigned long read_at = (unsigned long)-1;
+	static boolean value = TRUE;
+
+	performance_start();
+	return !performance_on || cinematic_in_progress() ||
+		performance_setting("display.performance_sky", &read_at, &value);
+}
+
+boolean console_performance_hud_frames(void)
+{
+	static unsigned long read_at = (unsigned long)-1;
+	static boolean value = TRUE;
+
+	performance_start();
+	return !performance_on || cinematic_in_progress() ||
+		performance_setting("display.performance_hud_frames", &read_at, &value);
+}
+
+/* how far scenery nothing can touch is drawn, 0 as far as everything else */
+real console_performance_decoration_distance(void)
+{
+	static unsigned long read_at = (unsigned long)-1;
+	static real distance = 0.0f;
+
+	performance_start();
+	if (!performance_on || cinematic_in_progress())
+		return 0.0f;
+	if (read_at != config_changes())
+	{
+		read_at = config_changes();
+		distance = (real)config_real("display.performance_decoration_distance");
+	}
+	return distance;
 }
 
 /* each pass of the event pump, switched when its switch was pressed */
