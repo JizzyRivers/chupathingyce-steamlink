@@ -36,6 +36,8 @@ export HALO_SAVE_ROOT="$data/save"
 export VC_ENABLE_LTC=0
 # the box has no certificate authorities of its own, for the game list's https
 export SSL_CERT_FILE="$app/ca-certificates.crt"
+# (with the app, which an update replaces, not with the maps on the stick)
+export HALO_NET_BROKERS_FILE="$app/brokers.txt"
 cd "$app"
 [ -f launch.env ] && . ./launch.env
 # the package on the stick, installed here as well as by the box at its boot
@@ -44,7 +46,21 @@ cd "$app"
 # every update. this script may be replaced by it, so it starts over
 package=$stick/steamlink/apps/chupathingyce.tgz
 if [ -n "$mounted" ] && [ -f "$package" ]; then
-	if tar zxf "$package" -C "$app/.."; then
+	# (a copy of the game puts the ring up meanwhile: unpacking takes a minute
+	# and nothing else draws, so the television shows garbled video memory)
+	running=/tmp/chupathingyce-installing
+	screen=/tmp/chupathingyce-install-screen
+	: > "$running"
+	cp -f ./halo "$screen" && chmod +x "$screen"
+	HALO_INSTALL_SCREEN="$running" "$screen" > /dev/null 2>&1 &
+	shown=$!
+	tar zxf "$package" -C "$app/.."
+	unpacked=$?
+	sync
+	rm -f "$running"
+	wait "$shown"
+	rm -f "$screen"
+	if [ "$unpacked" -eq 0 ]; then
 		mv -f "$package" "$package.installed"
 		sync
 		umount "$stick"

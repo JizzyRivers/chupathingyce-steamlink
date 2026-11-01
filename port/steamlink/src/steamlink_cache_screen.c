@@ -257,6 +257,19 @@ static void ring_draw(float fraction, float pulse)
 	}
 }
 
+/* whether a screen drawn between slow steps is due again: three a second, as
+ten made the box's shaders take noticeably longer */
+int console_ring_due(void)
+{
+	static Uint64 shown;
+	Uint64 now = SDL_GetTicks();
+
+	if (shown && now - shown < 300)
+		return 0;
+	shown = now;
+	return 1;
+}
+
 /* the ring as far as fraction, 640x480 RGBA, for a screen to show */
 const unsigned char *console_ring_frame(float fraction, int with_sound)
 {
