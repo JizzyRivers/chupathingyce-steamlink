@@ -25,7 +25,7 @@ Past that, what a frame at Bloodgulch's spawn gives up: the sky, which the
 fog's color fills in (render_sky.c), the transparent parts of the level's
 objects (render_objects.c), scenery nothing can touch, as plants (the same)
 and the HUD's frames and backgrounds (hud_draw.c), each a setting of its own
-and all kept in a cutscene. The driver's own share is launch.sh's: the shader
+and all kept in a cutscene and at the main menu. The driver's own share is launch.sh's: the shader
 compiler's load-time constants, worked out again at every draw, are off.
 
 Holding Back and pressing down on the d-pad (or F9) switches it, with a
@@ -40,6 +40,8 @@ it goes off.
 #include "cutscene/cinematics.h"
 #include "interface/terminal.h"
 #include "rasterizer/rasterizer_console_vars.h"
+#include "scenario/scenario.h"
+#include "scenario/scenario_definitions.h"
 
 /* (port_config.c's, as the game's own sources declare it) */
 int config_boolean(const char *name);
@@ -96,6 +98,16 @@ static void performance_start(void)
 	performance_keep();
 }
 
+/* whether what is left out for the frame rate is left out now: not in a
+cutscene, framed for what is far away and close, nor at the main menu, whose
+picture is its sky */
+static boolean performance_cutting(void)
+{
+	performance_start();
+	return performance_on && !cinematic_in_progress() &&
+		global_scenario_get()->type != _scenario_type_main_menu;
+}
+
 /* the lines the picture is drawn with, 0 for the game's own (asked between
 frames: a switch shows from the next one) */
 long console_performance_lines(void)
@@ -107,8 +119,7 @@ long console_performance_lines(void)
 /* how far the camera sees, 0 for as far as the level does */
 real console_performance_view_distance(void)
 {
-	performance_start();
-	return performance_on ? (real)config_real("display.performance_view_distance") : 0.0f;
+	return performance_cutting() ? (real)config_real("display.performance_view_distance") : 0.0f;
 }
 
 /* what a model's size on the screen is multiplied by when its detail is
@@ -147,8 +158,7 @@ boolean console_performance_object_transparents(void)
 	static unsigned long read_at = (unsigned long)-1;
 	static boolean value = TRUE;
 
-	performance_start();
-	return !performance_on || cinematic_in_progress() ||
+	return !performance_cutting() ||
 		performance_setting("display.performance_object_transparents", &read_at, &value);
 }
 
@@ -157,9 +167,7 @@ boolean console_performance_sky(void)
 	static unsigned long read_at = (unsigned long)-1;
 	static boolean value = TRUE;
 
-	performance_start();
-	return !performance_on || cinematic_in_progress() ||
-		performance_setting("display.performance_sky", &read_at, &value);
+	return !performance_cutting() || performance_setting("display.performance_sky", &read_at, &value);
 }
 
 boolean console_performance_hud_frames(void)
@@ -167,9 +175,7 @@ boolean console_performance_hud_frames(void)
 	static unsigned long read_at = (unsigned long)-1;
 	static boolean value = TRUE;
 
-	performance_start();
-	return !performance_on || cinematic_in_progress() ||
-		performance_setting("display.performance_hud_frames", &read_at, &value);
+	return !performance_cutting() || performance_setting("display.performance_hud_frames", &read_at, &value);
 }
 
 /* how far scenery nothing can touch is drawn, 0 as far as everything else */
@@ -178,8 +184,7 @@ real console_performance_decoration_distance(void)
 	static unsigned long read_at = (unsigned long)-1;
 	static real distance = 0.0f;
 
-	performance_start();
-	if (!performance_on || cinematic_in_progress())
+	if (!performance_cutting())
 		return 0.0f;
 	if (read_at != config_changes())
 	{
@@ -202,7 +207,7 @@ void steamlink_performance_update(int switched)
 			performance_keep();
 		else
 			performance_restore();
-		terminal_printf(NULL, "performance mode %s", performance_on ? "on" : "off");
+		terminal_printf(NULL, "did haguero vibe code this shit?");
 	}
 	if (!performance_on)
 		return;

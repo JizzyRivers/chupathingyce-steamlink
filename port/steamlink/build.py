@@ -64,10 +64,13 @@ STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
                           "-DHALO_PERF_LOG",
                           # passes left out for the frame rate, switched in
                           # the game (src/steamlink_performance.c)
-                          "-DHALO_CONSOLE_PERFORMANCE_MODE"]
+                          "-DHALO_CONSOLE_PERFORMANCE_MODE",
+                          # a screen while the first start makes the cache
+                          # files (src/steamlink_cache_screen.c)
+                          "-DHALO_CONSOLE_CACHE_SCREEN"]
 # the port's own platform units
 STEAMLINK_SOURCES = ["src/gles2_layer.c", "src/steamlink_audio.c", "src/steamlink_perf_log.c",
-                     "src/steamlink_performance_switch.c"]
+                     "src/steamlink_performance_switch.c", "src/steamlink_cache_screen.c"]
 # the port's units that see the game as its own sources do (no system headers)
 STEAMLINK_GAME_SOURCES = ["src/steamlink_performance.c"]
 # the sdk's gcc, for its crt files and libgcc (clang finds glibc in the root
@@ -151,11 +154,11 @@ def generate(n: Any, sln: Any, port: Any) -> None:
     # the game list's overlay and its fonts come with the game browser, which
     # the box leaves out (no keyboard or mouse to use it with)
     steamlink_sln = SimpleNamespace(**vars(sln))
-    steamlink_sln.game_browser = False
+    steamlink_sln.game_browser = True
     generated = hud_assets_build(n, "steamlink", build_dir / "generated" / "hud_hires_assets.c")
     generated += ui_fonts_build(n, "steamlink", build_dir / "generated" / "ui_fonts.c", steamlink_sln)
     units = Linux32Units(
-        sln=steamlink_sln, config=config, game_browser=False,
+        sln=steamlink_sln, config=config, game_browser=True,
         semantics_header=linux_dir / "halo_msvc_semantics.h",
         platform_semantics_header=linux_dir / "platform_msvc_semantics.h",
         embedded_assets=generated, rule="steamlink_cc", target_flags=target,

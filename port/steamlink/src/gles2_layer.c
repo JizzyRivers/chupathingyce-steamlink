@@ -166,6 +166,7 @@ struct layer_texture
 	/* the minification filter asked for, and what was last given the driver
 	(0: not yet) */
 	GLint min_filter;
+	GLint own_mag, own_wrap_s, own_wrap_t;
 	GLint applied_min, applied_mag, applied_wrap_s, applied_wrap_t;
 };
 
@@ -355,25 +356,42 @@ static GLint wrap_mode(GLint mode)
 
 /* the sampler bound to unit, given to the texture bound there (on ES 2 a
 texture holds its own filter and wrap) */
+/* ES 2 has no samplers: a sampler's parameters are put on the textures bound
+where it is bound. With none bound, the texture's own go back (ES 3 has a
+sampler override them only while it is bound): without that, a texture bound
+for a moment on a unit with a sampler keeps the sampler's filter, and one
+with no smaller levels (the overlay's text atlas, uploaded to wherever the
+game left its units) is then incomplete, and samples black. 0: never set */
 static void sampler_apply(GLuint unit)
 {
-	struct layer_sampler *sampler;
+	struct layer_sampler *sampler = NULL;
 	int slot;
 
-	if (unit >= LAYER_TEXTURE_UNITS || !unit_samplers[unit] || unit_samplers[unit] >= LAYER_TRACKED)
+	if (unit >= LAYER_TEXTURE_UNITS)
 		return;
-	sampler = &samplers[unit_samplers[unit]];
+	if (unit_samplers[unit] && unit_samplers[unit] < LAYER_TRACKED)
+		sampler = &samplers[unit_samplers[unit]];
 	for (slot = 0; slot < 2; slot++)
 	{
 		GLenum target = slot ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
 		struct layer_texture *texture = texture_get(unit_textures[unit][slot]);
-		GLint min_filter;
+		GLint min_filter, mag_filter, wrap_s, wrap_t;
 
 		if (!texture)
 			continue;
-		min_filter = complete_min_filter(texture, sampler->min_filter);
-		if (texture->applied_min == min_filter && texture->applied_mag == sampler->mag_filter &&
-			texture->applied_wrap_s == sampler->wrap_s && texture->applied_wrap_t == sampler->wrap_t)
+		min_filter = sampler ? sampler->min_filter : texture->min_filter;
+		mag_filter = sampler ? sampler->mag_filter : texture->own_mag;
+		wrap_s = sampler ? sampler->wrap_s : texture->own_wrap_s;
+		wrap_t = sampler ? sampler->wrap_t : texture->own_wrap_t;
+		min_filter = min_filter ? complete_min_filter(texture, min_filter) : texture->applied_min;
+		if (!mag_filter)
+			mag_filter = texture->applied_mag;
+		if (!wrap_s)
+			wrap_s = texture->applied_wrap_s;
+		if (!wrap_t)
+			wrap_t = texture->applied_wrap_t;
+		if (texture->applied_min == min_filter && texture->applied_mag == mag_filter &&
+			texture->applied_wrap_s == wrap_s && texture->applied_wrap_t == wrap_t)
 		{
 			continue;
 		}
@@ -382,18 +400,18 @@ static void sampler_apply(GLuint unit)
 		counts.texture_parameters++;
 		if (texture->applied_min != min_filter)
 			real.TexParameteri(target, GL_TEXTURE_MIN_FILTER, min_filter);
-		if (texture->applied_mag != sampler->mag_filter)
-			real.TexParameteri(target, GL_TEXTURE_MAG_FILTER, sampler->mag_filter);
-		if (texture->applied_wrap_s != sampler->wrap_s)
-			real.TexParameteri(target, GL_TEXTURE_WRAP_S, sampler->wrap_s);
-		if (texture->applied_wrap_t != sampler->wrap_t)
-			real.TexParameteri(target, GL_TEXTURE_WRAP_T, sampler->wrap_t);
+		if (texture->applied_mag != mag_filter)
+			real.TexParameteri(target, GL_TEXTURE_MAG_FILTER, mag_filter);
+		if (texture->applied_wrap_s != wrap_s)
+			real.TexParameteri(target, GL_TEXTURE_WRAP_S, wrap_s);
+		if (texture->applied_wrap_t != wrap_t)
+			real.TexParameteri(target, GL_TEXTURE_WRAP_T, wrap_t);
 		if (unit != active_unit)
 			real.ActiveTexture(GL_TEXTURE0 + active_unit);
 		texture->applied_min = min_filter;
-		texture->applied_mag = sampler->mag_filter;
-		texture->applied_wrap_s = sampler->wrap_s;
-		texture->applied_wrap_t = sampler->wrap_t;
+		texture->applied_mag = mag_filter;
+		texture->applied_wrap_s = wrap_s;
+		texture->applied_wrap_t = wrap_t;
 	}
 }
 
@@ -490,17 +508,17 @@ static void GL_APIENTRY layer_TexParameteri(GLenum target, GLenum pname, GLint v
 		break;
 	case GL_TEXTURE_MAG_FILTER:
 		if (texture)
-			texture->applied_mag = value;
+			texture->applied_mag = texture->own_mag = value;
 		break;
 	case GL_TEXTURE_WRAP_S:
 		value = wrap_mode(value);
 		if (texture)
-			texture->applied_wrap_s = value;
+			texture->applied_wrap_s = texture->own_wrap_s = value;
 		break;
 	case GL_TEXTURE_WRAP_T:
 		value = wrap_mode(value);
 		if (texture)
-			texture->applied_wrap_t = value;
+			texture->applied_wrap_t = texture->own_wrap_t = value;
 		break;
 	default:
 		if (is_texture_parameter_es3(pname))

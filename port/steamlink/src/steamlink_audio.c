@@ -45,8 +45,11 @@ struct sdl2_audio_spec
 mixes 256 frames in about 2 ms) */
 #define OUTPUT_FRAMES 1024
 
-static void (*audio_mix)(float *output, unsigned long frames);
+static void (*volatile audio_mix)(float *output, unsigned long frames);
 static int audio_channels;
+/* (open already, for the first start's screens: steamlink_cache_screen.c.
+The game takes it over rather than opening it twice) */
+static int audio_open_rate;
 
 static void audio_callback(void *userdata, unsigned char *stream, int length)
 {
@@ -75,6 +78,12 @@ int console_audio_start(int rate, int channels, void (*mix)(float *output, unsig
 	struct sdl2_audio_spec wanted, given;
 	unsigned int device;
 
+	if (audio_open_rate == rate && audio_channels == channels)
+	{
+		audio_mix = mix;
+		platform_log("audio: the output taken over");
+		return 1;
+	}
 	if (!sdl2)
 	{
 		platform_log("audio: no firmware SDL2 (%s)", dlerror());
@@ -112,6 +121,7 @@ int console_audio_start(int rate, int channels, void (*mix)(float *output, unsig
 			current_driver(), get_error());
 		return 0;
 	}
+	audio_open_rate = rate;
 	pause_device(device, 0);
 	platform_log("audio: the firmware's %s output, %d Hz, %d channels, %d frames a buffer", current_driver(),
 		given.freq, given.channels, given.samples);
