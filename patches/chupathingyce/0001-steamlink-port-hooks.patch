@@ -154,6 +154,21 @@ index f3468d74..f4cf543e 100644
  #else
  	return "";
  #endif
+diff --git a/port/linux/src/browser.h b/port/linux/src/browser.h
+index 7fee04c6..0fd4ff80 100644
+--- a/port/linux/src/browser.h
++++ b/port/linux/src/browser.h
+@@ -19,7 +19,9 @@ game reached through an invite. See browser.c.
+ /* a player's name (UTF-16, as the game's: 11 characters and a 0) */
+ #define BROWSER_PLAYER_NAME_LENGTH 12
+ #define BROWSER_MAP_LENGTH 64
+-#define BROWSER_MAXIMUM_GAMES 64
++/* (the list server sends more than 64 now: those past the limit were dropped
++unseen, in the order it sends them, not the order they are shown in) */
++#define BROWSER_MAXIMUM_GAMES 256
+ /* a host's roster: the players it announces (as many as a game takes), and
+ those a listed game keeps (as many as the Online Games screen shows) */
+ #define BROWSER_HOSTED_ROSTER 128
 diff --git a/port/linux/src/build_identity.c b/port/linux/src/build_identity.c
 index e6cead87..f9ac423a 100644
 --- a/port/linux/src/build_identity.c
