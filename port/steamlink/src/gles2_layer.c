@@ -31,6 +31,7 @@ and the Android host's GL helpers the ES path calls (host_gl_*: xgpu.h).
 #include <SDL3/SDL.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -174,10 +175,23 @@ struct layer_sampler
 {
 	int used;
 	GLint min_filter, mag_filter, wrap_s, wrap_t;
+	/* D3DTADDRESS_BORDER on each axis, and its color: ES 2 has no border
+	clamp, so the pixel shaders do it (layer_sampleN, border_uniforms_apply) */
+	int border_s, border_t;
+	GLfloat border_color[4];
 };
 
 static struct layer_texture textures[LAYER_TRACKED];
 static struct layer_sampler samplers[LAYER_TRACKED];
+/* each program's border uniforms (border_helpers_head), their locations
+plus 1 (0 where it has none), and what was last given them */
+static struct
+{
+	GLint color, axes;
+	int uploaded;
+	GLfloat values[2][4][4];
+} border_programs[LAYER_TRACKED];
+static void border_uniforms_apply(void);
 static GLuint sampler_next = 1;
 static GLuint active_unit;
 /* the textures bound to each unit: [0] 2D, [1] cube */
@@ -599,8 +613,8 @@ static void sampler_parameter(GLuint name, GLenum pname, GLint value)
 	{
 	case GL_TEXTURE_MIN_FILTER: sampler->min_filter = value; break;
 	case GL_TEXTURE_MAG_FILTER: sampler->mag_filter = value; break;
-	case GL_TEXTURE_WRAP_S: sampler->wrap_s = wrap_mode(value); break;
-	case GL_TEXTURE_WRAP_T: sampler->wrap_t = wrap_mode(value); break;
+	case GL_TEXTURE_WRAP_S: sampler->wrap_s = wrap_mode(value); sampler->border_s = value == GL_CLAMP_TO_BORDER; break;
+	case GL_TEXTURE_WRAP_T: sampler->wrap_t = wrap_mode(value); sampler->border_t = value == GL_CLAMP_TO_BORDER; break;
 	default: return;
 	}
 	for (unit = 0; unit < LAYER_TEXTURE_UNITS; unit++)
@@ -622,6 +636,12 @@ static void GL_APIENTRY layer_SamplerParameterf(GLuint sampler, GLenum pname, GL
 
 static void GL_APIENTRY layer_SamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat *values)
 {
+	if (pname == GL_TEXTURE_BORDER_COLOR)
+	{
+		if (sampler && sampler < LAYER_TRACKED)
+			memcpy(samplers[sampler].border_color, values, sizeof(samplers[sampler].border_color));
+		return;
+	}
 	sampler_parameter(sampler, pname, (GLint)values[0]);
 }
 
@@ -1142,8 +1162,10 @@ static void GL_APIENTRY layer_VertexAttribPointer(GLuint index, GLint size, GLen
 static void GL_APIENTRY layer_VertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsizei stride,
 	const void *pointer)
 {
-	/* (the packed normals, D3DVSDT_NORMPACKED3: no integer attributes in ES 2) */
-	LAYER_ONCE("integer vertex attributes read as floats (packed normals are wrong)");
+	/* (the packed normals, D3DVSDT_NORMPACKED3: no integer attributes in
+	ES 2, and unpacking them, in the shader or for each draw, either does not
+	fit the skinned shaders or costs a tenth of a frame) */
+	LAYER_ONCE("integer vertex attributes read as floats (packed normals are flat)");
 	layer_VertexAttribPointer(index, size, type == GL_UNSIGNED_INT || type == GL_INT ? GL_UNSIGNED_SHORT : type,
 		GL_FALSE, stride, pointer);
 }
@@ -1152,6 +1174,29 @@ static void GL_APIENTRY layer_VertexAttribI4ui(GLuint index, GLuint x, GLuint y,
 {
 	if (index < (GLuint)attribute_maximum)
 		real.VertexAttrib4f(index, (GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w);
+}
+
+static int bones_window_needed(void);
+static void bones_window_apply(unsigned long lowest, unsigned long highest);
+
+/* the lowest and highest of count indices of type */
+static void index_range(GLenum type, const void *indices, GLsizei count, unsigned long *lowest,
+	unsigned long *highest)
+{
+	GLsizei index;
+
+	*lowest = (unsigned long)-1;
+	*highest = 0;
+	for (index = 0; index < count; index++)
+	{
+		unsigned long value = type == GL_UNSIGNED_BYTE ? ((const GLubyte *)indices)[index] :
+			type == GL_UNSIGNED_SHORT ? ((const GLushort *)indices)[index] : ((const GLuint *)indices)[index];
+
+		if (value < *lowest)
+			*lowest = value;
+		if (value > *highest)
+			*highest = value;
+	}
 }
 
 static GLuint program_current;
@@ -1810,6 +1855,9 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 		profile_report();
 	if (tracing())
 		trace("draw arrays mode %u count %d program %u", (unsigned)mode, (int)count, program_current);
+	border_uniforms_apply();
+	if (count > 0 && first >= 0 && bones_window_needed())
+		bones_window_apply((unsigned long)first, (unsigned long)first + (unsigned long)count - 1);
 	{
 		unsigned int feedback = feedback_begin();
 		unsigned int experiment = experiment_begin();
@@ -1857,6 +1905,14 @@ static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum ty
 	offset = indices;
 	indices = buffer_pointer(vertex_array()->element_buffer, indices);
 	skin_log(count, type, indices);
+	border_uniforms_apply();
+	if (indices && count > 0 && bones_window_needed())
+	{
+		unsigned long lowest, highest;
+
+		index_range(type, indices, count, &lowest, &highest);
+		bones_window_apply(lowest, highest);
+	}
 	if (indices)
 	{
 		unsigned int feedback = feedback_begin();
@@ -2504,6 +2560,10 @@ struct layer_shader
 	int attribute_count;
 	char attribute_names[LAYER_ATTRIBUTES][32];
 	GLint attribute_locations[LAYER_ATTRIBUTES];
+	/* a skinned shader's node indices: the attribute (v<n>) and the constant
+	(c[<k>].w) its a0 is taken from, and its weights' attribute (the first
+	node's in x, both's sum in w), -1 for none (bones_window_apply) */
+	int node_attribute, node_scale, weight_attribute;
 };
 
 static struct layer_shader shaders[LAYER_TRACKED];
@@ -2651,6 +2711,33 @@ static const char fragment_helpers[] =
 	"vec4 texture(samplerCube s, vec3 c, float b) { return textureCube(s, c); }\n"
 	"vec4 textureLod(sampler2D s, vec2 c, float l) { return texture2D(s, c); }\n"
 	"vec4 textureLod(samplerCube s, vec3 c, float l) { return textureCube(s, c); }\n";
+/* D3DTADDRESS_BORDER, which ES 2 has not: each unit's 2D lookups give its
+border color where they fall outside the texture on an axis that has one
+(the motion tracker's sweep is drawn with its coordinates past the edges,
+and the border's alpha fades the blips under it). The pixel shaders'
+texture(texN, (...)) become layer_sampleN (text_replacements); the
+uniforms are border_uniforms_apply's, all 0 where no unit has a border */
+static const char border_helpers_head[] =
+	"uniform vec4 layer_border_color[4];\n"
+	"uniform vec4 layer_border_axes[4];\n";
+static const char border_helper_unit[] =
+	"vec4 layer_sample%d(sampler2D s, vec2 c, float b)\n"
+	"{\n"
+	"\tvec2 o = step(vec2(0.5), abs(c - 0.5)) * layer_border_axes[%d].xy;\n"
+	"\treturn mix(texture2D(s, c), layer_border_color[%d], max(o.x, o.y));\n"
+	"}\n"
+	"vec4 layer_sample%d(sampler2D s, vec2 c) { return layer_sample%d(s, c, 0.0); }\n"
+	"vec4 layer_sample%d(sampler2D s, vec3 c, float b) { return texture2D(s, c.xy); }\n"
+	"vec4 layer_sample%d(sampler2D s, vec3 c) { return texture2D(s, c.xy); }\n"
+	"vec4 layer_sample%d(samplerCube s, vec3 c, float b) { return textureCube(s, c); }\n"
+	"vec4 layer_sample%d(samplerCube s, vec3 c) { return textureCube(s, c); }\n";
+static const char *const border_replacements[] = {
+	"texture(tex0, (", "layer_sample0(tex0, (",
+	"texture(tex1, (", "layer_sample1(tex1, (",
+	"texture(tex2, (", "layer_sample2(tex2, (",
+	"texture(tex3, (", "layer_sample3(tex3, (",
+	NULL,
+};
 static const char vertex_helpers[] =
 	"vec4 texture(sampler2D s, vec2 c) { return texture2DLod(s, c, 0.0); }\n"
 	"vec4 texture(samplerCube s, vec3 c) { return textureCubeLod(s, c, 0.0); }\n"
@@ -3130,19 +3217,65 @@ static void attributes_prune(struct layer_shader *shader, struct text *source)
 	}
 }
 
+/* D3DVSDT_NORMPACKED3, unpacked with bit shifts: in ES 1.00, which has none
+and no integer attributes, every such normal straight up (the models'
+lighting is off; the skinned shaders have no room to do it in floats) */
+#define NORMPACKED3_UNPACK "vec4 unpack_normpacked3(float p) { return vec4(0.0, 0.0, 1.0, 1.0); }\n"
+
+/* a skinned shader's node indices, as the renderer's model shaders take
+them: "(v<n>.xyzw) * (c_<k>.wwww)" a little before its first
+"a0 = int(floor(" (a node's index times three, the rows of its matrix) */
+static void node_index_find(struct layer_shader *shader, const char *text)
+{
+	const char *a0 = strstr(text, "a0 = int(floor(");
+	const char *weighted = strstr(text, ".xxxx) * (c_bones[");
+	const char *at;
+
+	/* (the first node's weight: "(v<n>.xxxx) * (c_bones[") */
+	for (at = weighted; at && at > text && weighted - at < 8; at--)
+	{
+		int attribute;
+
+		if (at[0] == '(' && at[1] == 'v' && sscanf(at, "(v%d.xxxx)", &attribute) == 1)
+		{
+			shader->weight_attribute = attribute;
+			break;
+		}
+	}
+	if (!a0)
+		return;
+	for (at = a0; at > text && a0 - at < 400; at--)
+	{
+		int attribute, scale;
+
+		if (at[0] == '(' && at[1] == 'v' && sscanf(at, "(v%d.xyzw) * (c_%d.wwww)", &attribute, &scale) == 2)
+		{
+			shader->node_attribute = attribute;
+			shader->node_scale = scale;
+			return;
+		}
+	}
+}
+
 static char *shader_translate(struct layer_shader *shader, const char *source)
 {
-	static const char *const words[] = {
+	static const char *const fragment_words[] = {
 		"sampler3D", "sampler2D",
 		"gl_FragDepth", "gl_FragDepthEXT",
-		/* (the packed normals' attribute: no integers in ES 1.00's
-		attributes, nor bit shifts to unpack them with) */
+		"uint", "float",
+		NULL,
+	};
+	/* (the packed normals' attribute: no integers in ES 1.00's attributes,
+	nor bit shifts to unpack them with) */
+	static const char *const vertex_words[] = {
+		"sampler3D", "sampler2D",
 		"uint", "float",
 		NULL,
 	};
 	struct text body = { 0 }, result = { 0 };
 	const char *line = source;
 	int fragment = shader->type == GL_FRAGMENT_SHADER;
+	const char *const *words = fragment ? fragment_words : vertex_words;
 	int skipping = 0;
 
 	shader->attribute_count = 0;
@@ -3164,9 +3297,7 @@ static char *shader_translate(struct layer_shader *shader, const char *source)
 		}
 		else if (starts_with(text, "vec4 unpack_normpacked3("))
 		{
-			/* D3DVSDT_NORMPACKED3 unpacked with bit shifts: a normal straight
-			up in ES 1.00 (the models' lighting is wrong; the menus have none) */
-			text_add(&body, "vec4 unpack_normpacked3(float p) { return vec4(0.0, 0.0, 1.0, 1.0); }\n");
+			text_add(&body, NORMPACKED3_UNPACK);
 			skipping = !memchr(text, '}', length - (size_t)(text - line));
 		}
 		else if (length >= sizeof(declaration))
@@ -3256,6 +3387,28 @@ static char *shader_translate(struct layer_shader *shader, const char *source)
 	text_add(&result, "precision highp float;\nprecision highp int;\n");
 	text_add(&result, common_helpers);
 	text_add(&result, fragment ? fragment_helpers : vertex_helpers);
+	/* (only where one texture is sampled: the motion tracker's and the
+	HUD's, not the level's and the models', whose many lookups would each
+	pay for the test) */
+	if (fragment && body.buffer && strstr(body.buffer, "texture(tex") &&
+		!strstr(strstr(body.buffer, "texture(tex") + 1, "texture(tex"))
+	{
+		struct text bordered = { 0 };
+		int unit;
+
+		replace_text(&bordered, body.buffer, border_replacements);
+		free(body.buffer);
+		body = bordered;
+
+		text_add(&result, border_helpers_head);
+		for (unit = 0; unit < 4; unit++)
+		{
+			char helper[sizeof(border_helper_unit) + 64];
+
+			snprintf(helper, sizeof(helper), border_helper_unit, unit, unit, unit, unit, unit, unit, unit, unit, unit);
+			text_add(&result, helper);
+		}
+	}
 	if (body.buffer)
 		replace_text(&result, body.buffer, text_replacements);
 	free(body.buffer);
@@ -3289,6 +3442,9 @@ static char *shader_translate(struct layer_shader *shader, const char *source)
 		}
 		attributes_prune(shader, &result);
 	}
+	shader->node_attribute = shader->node_scale = shader->weight_attribute = -1;
+	if (!fragment && result.buffer)
+		node_index_find(shader, result.buffer);
 	return result.buffer;
 }
 
@@ -3612,6 +3768,9 @@ static void GL_APIENTRY layer_LinkProgram(GLuint program)
 	{
 		free(constant_split[program]);
 		constant_split[program] = NULL;
+		border_programs[program].color = linked ? halo_glGetUniformLocation(program, "layer_border_color") + 1 : 0;
+		border_programs[program].axes = linked ? halo_glGetUniformLocation(program, "layer_border_axes") + 1 : 0;
+		border_programs[program].uploaded = 0;
 	}
 	if (!linked && reported < 6)
 	{
@@ -3651,6 +3810,41 @@ stand in front of for c[]) */
 static __typeof__(halo_glGetUniformLocation) real_GetUniformLocation;
 static __typeof__(halo_glUniform4fv) real_Uniform4fv;
 
+/* the current program's border uniforms, from the samplers on units 0 to 3,
+given only when they change (nearly never: the motion tracker's draws) */
+static void border_uniforms_apply(void)
+{
+	GLfloat values[2][4][4];
+	GLuint unit;
+
+	if (program_current >= LAYER_TRACKED || border_programs[program_current].color <= 0 ||
+		border_programs[program_current].axes <= 0 || !real_Uniform4fv)
+	{
+		return;
+	}
+	memset(values, 0, sizeof(values));
+	for (unit = 0; unit < 4; unit++)
+	{
+		const struct layer_sampler *sampler = unit_samplers[unit] && unit_samplers[unit] < LAYER_TRACKED ?
+			&samplers[unit_samplers[unit]] : NULL;
+
+		if (!sampler || (!sampler->border_s && !sampler->border_t))
+			continue;
+		memcpy(values[0][unit], sampler->border_color, sizeof(values[0][unit]));
+		values[1][unit][0] = sampler->border_s ? 1.0f : 0.0f;
+		values[1][unit][1] = sampler->border_t ? 1.0f : 0.0f;
+	}
+	if (border_programs[program_current].uploaded &&
+		!memcmp(values, border_programs[program_current].values, sizeof(values)))
+	{
+		return;
+	}
+	real_Uniform4fv(border_programs[program_current].color - 1, 4, &values[0][0][0]);
+	real_Uniform4fv(border_programs[program_current].axes - 1, 4, &values[1][0][0]);
+	memcpy(border_programs[program_current].values, values, sizeof(values));
+	border_programs[program_current].uploaded = 1;
+}
+
 /* c[]'s location as the renderer is given it: one no uniform has, so that
 its uploads to c + k (d3d8_gl.c, k to 191) reach layer_Uniform4fv, which
 sends each to where constants_split put that constant */
@@ -3662,6 +3856,11 @@ struct constant_split
 {
 	GLint named[192];
 	GLint bones;
+	/* every c[] the renderer gave, kept for bones_window_apply: whether any
+	went past c_bones' last (c[167]), the node constant c_bones[0] holds now
+	(as an offset from c[60]), and whether c_bones is behind the copy */
+	GLfloat kept[192][4];
+	int past_bones, window, window_stale;
 };
 
 static GLint GL_APIENTRY layer_GetUniformLocation(GLuint program, const GLchar *name)
@@ -3682,7 +3881,7 @@ virtual location's Nth, all 192 (its uploads go where each is) */
 	if (program >= LAYER_TRACKED || strcmp(name, "c"))
 		return real_GetUniformLocation(program, name);
 	if (!constant_split[program])
-		constant_split[program] = malloc(sizeof(struct constant_split));
+		constant_split[program] = calloc(1, sizeof(struct constant_split));
 	split = constant_split[program];
 	if (!split)
 		return -1;
@@ -3741,13 +3940,22 @@ static void GL_APIENTRY layer_Uniform4fv(GLint location, GLsizei count, const GL
 	if (count > 192 - first)
 		count = 192 - first;
 	merge_stats_uniform(program_current, first, count, values);
-	/* the block's, together */
-	if (split->bones >= 0 && first + count > BONES_FIRST && first < BONES_FIRST + BONES_COUNT)
+	memcpy(split->kept[first], values, (size_t)count * 4 * sizeof(GLfloat));
+	/* (past c[167]: kept for the draws that need them, bones_window_apply) */
+	if (split->bones >= 0 && first + count > BONES_FIRST + BONES_COUNT)
+		split->past_bones = 1;
+	/* the block's, together, while it holds c[60] on (else the next draw
+	that shifts it sends them, bones_window_apply) */
+	if (split->bones >= 0 && first + count > BONES_FIRST && first < BONES_FIRST + BONES_COUNT && !split->window)
 	{
 		GLint from = first > BONES_FIRST ? first : BONES_FIRST;
 		GLint to = first + count < BONES_FIRST + BONES_COUNT ? first + count : BONES_FIRST + BONES_COUNT;
 
 		real_Uniform4fv(split->bones + (from - BONES_FIRST), to - from, values + (from - first) * 4);
+	}
+	else if (split->bones >= 0 && first + count > BONES_FIRST)
+	{
+		split->window_stale = 1;
 	}
 	/* and each named one */
 	for (index = first; index < first + count; index++)
@@ -3755,6 +3963,218 @@ static void GL_APIENTRY layer_Uniform4fv(GLint location, GLsizei count, const GL
 		if (split->named[index] >= 0)
 			real_Uniform4fv(split->named[index], 1, values + (index - first) * 4);
 	}
+}
+
+/* an attribute's component as the GPU reads it, a float */
+static GLfloat attribute_component(const struct layer_attribute *attribute, const unsigned char *vertex, int component)
+{
+	switch (attribute->type)
+	{
+	case GL_FLOAT:
+	{
+		GLfloat value;
+
+		memcpy(&value, vertex + component * 4, sizeof(value));
+		return value;
+	}
+	case GL_SHORT:
+	{
+		GLshort value;
+
+		memcpy(&value, vertex + component * 2, sizeof(value));
+		return attribute->normalized ? (value < -32767 ? -1.0f : (GLfloat)value / 32767.0f) : (GLfloat)value;
+	}
+	case GL_UNSIGNED_SHORT:
+	{
+		GLushort value;
+
+		memcpy(&value, vertex + component * 2, sizeof(value));
+		return attribute->normalized ? (GLfloat)value / 65535.0f : (GLfloat)value;
+	}
+	case GL_BYTE:
+		return attribute->normalized ? ((GLbyte)vertex[component] < -127 ? -1.0f :
+			(GLfloat)(GLbyte)vertex[component] / 127.0f) : (GLfloat)(GLbyte)vertex[component];
+	case GL_UNSIGNED_BYTE:
+		return attribute->normalized ? (GLfloat)vertex[component] / 255.0f : (GLfloat)vertex[component];
+	default:
+		return 0.0f;
+	}
+}
+
+/* whether the current program is a skinned one that has been given nodes
+past c_bones (or holds a window of them now) */
+static int bones_window_needed(void)
+{
+	const struct constant_split *split = program_current < LAYER_TRACKED ? constant_split[program_current] : NULL;
+
+	return split && split->bones >= 0 && (split->past_bones || split->window);
+}
+
+/* A skinned model with more nodes than c_bones holds (the first-person
+weapons: the Xbox had room to c[191], 44 nodes; the box's shaders have 36,
+to c[167]). A draw seldom reaches nodes far apart, so the 36 its vertices
+need go into c_bones (from layer_Uniform4fv's copy of c[]), and its node
+indices are given less that much: a copy of them, as for the packed
+normals. Every other draw, c_bones holds c[60] on as before. Vertices
+lowest to highest are the draw's */
+static void bones_window_apply(unsigned long lowest, unsigned long highest)
+{
+	static GLfloat *shifted;
+	static unsigned long shifted_size;
+	struct constant_split *split = program_current < LAYER_TRACKED ? constant_split[program_current] : NULL;
+	const struct layer_shader *vertex_shader;
+	struct layer_attribute *attribute;
+	const struct layer_attribute *weight_attribute = NULL;
+	const unsigned char *source, *weights = NULL;
+	GLsizei weight_stride = 0;
+	const long *byte_rows = NULL;
+	GLfloat scale;
+	long low = 0x7fffffff, high = -1, window = 0;
+	unsigned long vertex;
+	GLsizei stride;
+	int components, component;
+
+	if (!split || split->bones < 0 || (!split->past_bones && !split->window) || highest < lowest)
+		return;
+	vertex_shader = program_vertex_shaders[program_current] < LAYER_TRACKED ?
+		&shaders[program_vertex_shaders[program_current]] : NULL;
+	if (!vertex_shader || vertex_shader->node_attribute < 0 || vertex_shader->node_attribute >= LAYER_ATTRIBUTES ||
+		vertex_shader->node_attribute >= attribute_maximum || vertex_shader->node_scale < 0 ||
+		vertex_shader->node_scale >= 192)
+	{
+		return;
+	}
+	attribute = &vertex_array()->attributes[vertex_shader->node_attribute];
+	source = buffer_pointer(attribute->buffer, attribute->pointer);
+	scale = split->kept[vertex_shader->node_scale][3];
+	components = attribute->size > 0 && attribute->size <= 4 ? attribute->size : 4;
+	stride = attribute->stride ? attribute->stride : components * (attribute->type == GL_FLOAT ? 4 :
+		attribute->type == GL_SHORT || attribute->type == GL_UNSIGNED_SHORT ? 2 : 1);
+	if (!source || scale <= 0.0f)
+		return;
+	if (vertex_shader->weight_attribute >= 0 && vertex_shader->weight_attribute < LAYER_ATTRIBUTES &&
+		vertex_shader->weight_attribute < attribute_maximum)
+	{
+		const struct layer_buffer *buffer;
+
+		weight_attribute = &vertex_array()->attributes[vertex_shader->weight_attribute];
+		weights = buffer_pointer(weight_attribute->buffer, weight_attribute->pointer);
+		weight_stride = weight_attribute->stride ? weight_attribute->stride :
+			(weight_attribute->size > 0 ? weight_attribute->size : 4) * (weight_attribute->type == GL_FLOAT ? 4 :
+			weight_attribute->type == GL_SHORT || weight_attribute->type == GL_UNSIGNED_SHORT ? 2 : 1);
+		buffer = buffer_get(weight_attribute->buffer);
+		if (buffer && buffer->size >= 0 &&
+			(unsigned long)(uintptr_t)weight_attribute->pointer + highest * (unsigned long)weight_stride + 16 >
+			(unsigned long)buffer->size)
+		{
+			weights = NULL;
+		}
+	}
+	{
+		const struct layer_buffer *buffer = buffer_get(attribute->buffer);
+
+		if (buffer && buffer->size >= 0 &&
+			(unsigned long)(uintptr_t)attribute->pointer + highest * (unsigned long)stride + (unsigned long)components * 4 >
+			(unsigned long)buffer->size)
+		{
+			return;
+		}
+	}
+	if (attribute->type == GL_UNSIGNED_BYTE && attribute->normalized)
+	{
+		static long table[256];
+		static GLfloat table_scale;
+		int byte;
+
+		if (table_scale != scale)
+		{
+			for (byte = 0; byte < 256; byte++)
+				table[byte] = (long)floorf((GLfloat)byte / 255.0f * scale + 0.001f);
+			table_scale = scale;
+		}
+		byte_rows = table;
+	}
+	/* the rows the draw's vertices read: node * 3 to node * 3 + 2, each of
+	the two nodes a vertex has (as the shader takes them, a0) */
+	for (vertex = lowest; vertex <= highest; vertex++)
+	{
+		const unsigned char *at = source + vertex * (unsigned long)stride;
+		/* (the second node only where it weighs something: a vertex of one
+		node has filler there) */
+		int nodes = 2;
+
+		if (weights)
+		{
+			const unsigned char *weight = weights + vertex * (unsigned long)weight_stride;
+			GLfloat first_weight = attribute_component(weight_attribute, weight, 0);
+			GLfloat sum = weight_attribute->size >= 4 ? attribute_component(weight_attribute, weight, 3) : 1.0f;
+
+			if (fabsf(sum - first_weight) < 0.0001f)
+				nodes = 1;
+		}
+		for (component = 0; component < nodes && component < components; component++)
+		{
+			/* (the models' node indices are normalized bytes: a table) */
+			long row = byte_rows ? byte_rows[at[component]] :
+				(long)floorf(attribute_component(attribute, at, component) * scale + 0.001f);
+
+			if (row < low)
+				low = row;
+			if (row + 2 > high)
+				high = row + 2;
+		}
+	}
+	if (high >= BONES_COUNT)
+	{
+		if (high - low >= BONES_COUNT || low < 0)
+		{
+			LAYER_ONCE("a skinned draw reaches nodes further apart than c_bones holds (rows %ld to %ld)", low, high);
+			return;
+		}
+		window = low;
+		LAYER_ONCE("skinned draws past c[%d] given the nodes they need in c_bones", BONES_FIRST + BONES_COUNT - 1);
+	}
+	if (window != split->window || (window && split->window_stale))
+	{
+		GLsizei rows = BONES_FIRST + window + BONES_COUNT <= 192 ? BONES_COUNT : 192 - BONES_FIRST - (GLsizei)window;
+
+		real_Uniform4fv(split->bones, rows, split->kept[BONES_FIRST + window]);
+		split->window = (int)window;
+		split->window_stale = 0;
+	}
+	if (!window)
+	{
+		/* (the renderer's own node indices again, should a shifted copy have
+		taken their place) */
+		attribute_apply((GLuint)vertex_shader->node_attribute, attribute);
+		return;
+	}
+	if (shifted_size < highest - lowest + 1)
+	{
+		GLfloat *grown = realloc(shifted, (highest - lowest + 1) * 4 * sizeof(GLfloat));
+
+		if (!grown)
+			return;
+		shifted = grown;
+		shifted_size = highest - lowest + 1;
+	}
+	for (vertex = lowest; vertex <= highest; vertex++)
+	{
+		const unsigned char *at = source + vertex * (unsigned long)stride;
+		GLfloat *to = shifted + (vertex - lowest) * 4;
+
+		for (component = 0; component < 4; component++)
+		{
+			to[component] = component < components ? attribute_component(attribute, at, component) :
+				(component == 3 ? 1.0f : 0.0f);
+			if (component < 2)
+				to[component] -= (GLfloat)window / scale;
+		}
+	}
+	counts.pointers++;
+	real.BindBuffer(GL_ARRAY_BUFFER, 0);
+	real.VertexAttribPointer((GLuint)vertex_shader->node_attribute, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+		shifted - lowest * 4);
 }
 
 /* HALO_GLES2_SKIN_LOG: the first skinned draws' attributes (their formats
