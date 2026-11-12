@@ -38,6 +38,9 @@ it goes off.
 
 #include "cseries.h"
 #include "cutscene/cinematics.h"
+#include "game/game.h"
+#include "game/players.h"
+#include "interface/hud_messaging.h"
 #include "interface/terminal.h"
 #include "rasterizer/rasterizer_console_vars.h"
 #include "scenario/scenario.h"
@@ -49,6 +52,7 @@ long config_integer(const char *name);
 double config_real(const char *name);
 unsigned long config_changes(void);
 void steamlink_performance_update(int switched);
+void steamlink_hud_message(const char *text);
 long console_performance_lines(void);
 real console_performance_view_distance(void);
 real console_performance_model_detail(void);
@@ -194,6 +198,50 @@ real console_performance_decoration_distance(void)
 	return distance;
 }
 
+/* a line where the player sees it: the HUD's messages, as a checkpoint's,
+for each player on this box, in a level (the main menu has no HUD). The
+console's lines (terminal_printf) show only while it is open for typing
+(terminal_render 2), which a pad never opens. A message holds 62
+characters, so a longer line is several, broken between words */
+void steamlink_hud_message(const char *text)
+{
+	enum { HUD_MESSAGE_CHARACTERS = 62, HUD_MESSAGE_PARTS = 4 };
+	wchar_t parts[HUD_MESSAGE_PARTS][HUD_MESSAGE_CHARACTERS + 1];
+	short player, players;
+	int count = 0;
+
+	terminal_printf(NULL, "%s", text);
+	if (!game_in_progress() || global_scenario_get()->type == _scenario_type_main_menu)
+		return;
+	while (*text && count < HUD_MESSAGE_PARTS)
+	{
+		int length = (int)strlen(text), index;
+
+		if (length > HUD_MESSAGE_CHARACTERS)
+		{
+			for (length = HUD_MESSAGE_CHARACTERS; length > 0 && text[length] != ' '; length--)
+			{
+			}
+			if (!length)
+				length = HUD_MESSAGE_CHARACTERS;
+		}
+		for (index = 0; index < length; index++)
+			parts[count][index] = (wchar_t)(unsigned char)text[index];
+		parts[count++][length] = 0;
+		text += length;
+		while (*text == ' ')
+			text++;
+	}
+	/* (the newest message is the top one: the last part first, so that the
+	line reads down the screen) */
+	players = local_player_count();
+	while (count--)
+	{
+		for (player = 0; player < players; player++)
+			hud_print_message(player, parts[count]);
+	}
+}
+
 /* each pass of the event pump, switched when its switch was pressed */
 void steamlink_performance_update(int switched)
 {
@@ -207,7 +255,9 @@ void steamlink_performance_update(int switched)
 			performance_keep();
 		else
 			performance_restore();
-		terminal_printf(NULL, "did haguero vibe code this shit?");
+		/* (newest on top: the state reads first) */
+		steamlink_hud_message("did haguero vibe code this shit?");
+		steamlink_hud_message(performance_on ? "performance mode on" : "performance mode off");
 	}
 	if (!performance_on)
 		return;

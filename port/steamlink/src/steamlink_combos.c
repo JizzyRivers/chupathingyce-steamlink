@@ -14,10 +14,11 @@ in-game combos, and a key does each one too:
 	                         (debug.screenshot_directory, run.sh sets it)
 	Back + left stick (F5)   a line from the xbox-scene days
 	Back + Start + both      in-game reset: back to the Steam Link's menu
-	triggers
+	triggers (or bumpers)
 
-The lines go to the game's console (terminal.c), green as the scene's
-dashboards were, and to the log. For a test with nobody at the pad,
+The lines go to the HUD's messages in a level (steamlink_hud_message,
+steamlink_performance.c: the console's lines show only while it is open for
+typing) and to the log. For a test with nobody at the pad,
 HALO_COMBO_TEST presses them: its letters (p f i s l r, as the list above)
 one every two seconds, from its first number of seconds after the start
 ("40:fislr").
@@ -38,7 +39,7 @@ void steamlink_performance_update(int switched);
 /* (the game's: main.c's counter, terminal.c's console, d3d8_gl.c's shot, the
 menus' quit and the build's name) */
 extern unsigned char display_framerate;
-void terminal_printf(const void *color, const char *format, ...);
+void steamlink_hud_message(const char *text);
 void halo_test_screenshot(void);
 void platform_request_quit(void);
 const char *build_identity_watermark(void);
@@ -53,9 +54,6 @@ enum
 	COMBO_RESET,
 	NUMBER_OF_COMBOS
 };
-
-/* the console's color: alpha, red, green, blue */
-static const float scene_green[4] = { 1.0f, 0.45f, 1.0f, 0.25f };
 
 static const char *const scene_lines[] =
 {
@@ -93,7 +91,7 @@ static void scene_printf(const char *format, ...)
 	vsnprintf(line, sizeof(line), format, arguments);
 	va_end(arguments);
 	platform_log("combo: %s", line);
-	terminal_printf(scene_green, "%s", line);
+	steamlink_hud_message(line);
 }
 
 /* HALO_COMBO_TEST's combo held now, as a bit */
@@ -151,10 +149,23 @@ static unsigned held_combos(void)
 		{
 			/* (Start is in no other combo: the reset needs it, so the
 			others cannot go off on the way to it) */
-			if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16384 &&
-				SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16384)
-			{
+			Sint16 left = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+			Sint16 right = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+			bool left_bumper = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+			bool right_bumper = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+
+			if ((left > 8000 && right > 8000) || (left_bumper && right_bumper))
 				held |= 1u << COMBO_RESET;
+			/* (what the pad says while Back and Start are held, once a
+			change: why a reset did or did not go off) */
+			{
+				static int last = -1;
+				int now = (left > 8000) | (right > 8000) << 1 | left_bumper << 2 | right_bumper << 3;
+
+				if (now != last)
+					platform_log("combo: back + start held, triggers %d %d, bumpers %d %d", left, right,
+						left_bumper, right_bumper);
+				last = now;
 			}
 			continue;
 		}
@@ -208,9 +219,10 @@ static void system_info(void)
 		snprintf(temperature_text, sizeof(temperature_text), "cpu %lld c", temperature / 1000);
 	else if (temperature > 0)
 		snprintf(temperature_text, sizeof(temperature_text), "cpu %lld c", temperature);
-	scene_printf("sysinfo: %s", build_identity_watermark());
+	/* (the HUD's newest message is its top one: the heading last) */
 	scene_printf("ram %lld mb free of %lld, the game %lld mb. %s. up %lld min",
 		(free_kb + cached + buffers) / 1024, total / 1024, game / 1024, temperature_text, uptime / 60);
+	scene_printf("sysinfo: %s", build_identity_watermark());
 }
 
 static void screenshot(void)
