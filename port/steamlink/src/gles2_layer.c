@@ -1767,6 +1767,31 @@ static void draw_traced(const char *kind, GLenum mode, GLsizei count)
 		program_current, draw_framebuffer_seen(), (unsigned)error);
 }
 
+/* a glFlush after every FLUSH_EVERY draws (HALO_GLES2_FLUSH_EVERY=n for
+another n, 0 for none). The driver keeps a frame's commands until the swap,
+the GPU then working through all of them while the CPU waits (12 of
+present's 14 ms at Bloodgulch's spawn); a flush on the way sends what there
+is, so the GPU starts while the CPU is still on the rest of the frame. There,
+in performance mode, a frame went from 46.6 ms to 42.8 every 12 draws, 43.3
+every 16, 44.3 every 8 (each flush waits a little) and 44.5 every 24 */
+#define FLUSH_EVERY 12
+static void draw_flush_maybe(void)
+{
+	static long every = -1;
+	static void (GL_APIENTRY *flush)(void);
+
+	if (every < 0)
+	{
+		const char *value = getenv("HALO_GLES2_FLUSH_EVERY");
+
+		every = value ? atol(value) : FLUSH_EVERY;
+		flush = (__typeof__(flush))SDL_GL_GetProcAddress("glFlush");
+		platform_log("gles2: a flush every %ld draws", every);
+	}
+	if (every > 0 && flush && draws_total % (unsigned long)every == 0)
+		flush();
+}
+
 static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count)
 {
 	merge_stats_draw(program_current);
@@ -1802,6 +1827,7 @@ static void GL_APIENTRY layer_DrawArrays(GLenum mode, GLint first, GLsizei count
 	if (slow_checking)
 		draw_slow_check("draw arrays", mode, count, 0, start);
 	draw_traced("draw arrays", mode, count);
+	draw_flush_maybe();
 }
 
 static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
@@ -1861,6 +1887,7 @@ static void GL_APIENTRY layer_DrawElements(GLenum mode, GLsizei count, GLenum ty
 	if (slow_checking)
 		draw_slow_check("draw elements", mode, count, type, start);
 	draw_traced("draw elements", mode, count);
+	draw_flush_maybe();
 }
 
 static void GL_APIENTRY layer_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices,
@@ -2222,7 +2249,11 @@ static void GL_APIENTRY layer_BlitFramebuffer(GLint source_x0, GLint source_y0, 
 
 		/* (HALO_GLES2_FRAME_SPLIT: the GPU's share of each frame, as the time
 		a glFinish waits at its end) */
-		if (getenv("HALO_GLES2_FRAME_SPLIT"))
+		static int frame_split = -1;
+
+		if (frame_split < 0)
+			frame_split = getenv("HALO_GLES2_FRAME_SPLIT") != NULL;
+		if (frame_split)
 		{
 			Uint64 before = SDL_GetTicks();
 
@@ -2652,6 +2683,10 @@ static const char *const text_replacements[] = {
 	"ivec2 size = textureSize(tex0, 0);", "",
 	"ivec2 pixel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);", "",
 	"texelFetch(tex0, pixel, 0)", "texture2D(tex0, uv)",
+	/* the combiners' mux on r0.a's lowest bit (nv2a_psh.c, 0.9.0): ES 1.00
+	has no integer & (a "reserved operator"), so the bit is the 8-bit
+	value's oddness */
+	"(int(r0.a * 255.0 + 0.5) & 1) != 0", "mod(floor(r0.a * 255.0 + 0.5), 2.0) >= 0.5",
 	NULL,
 };
 
@@ -3672,6 +3707,9 @@ virtual location's Nth, all 192 (its uploads go where each is) */
 	return any ? CONSTANTS_VIRTUAL_LOCATION : -1;
 }
 
+/* HALO_GLES2_CONSTANT_LOG, -1 before it is looked up */
+static int constant_log = -1;
+
 static void GL_APIENTRY layer_Uniform4fv(GLint location, GLsizei count, const GLfloat *values)
 {
 	struct constant_split *split;
@@ -3684,7 +3722,11 @@ static void GL_APIENTRY layer_Uniform4fv(GLint location, GLsizei count, const GL
 		return;
 	}
 	split = program_current < LAYER_TRACKED ? constant_split[program_current] : NULL;
-	if (getenv("HALO_GLES2_CONSTANT_LOG"))
+	/* (looked up once: this is every upload, hundreds a frame, and getenv
+	walks the whole environment) */
+	if (constant_log < 0)
+		constant_log = getenv("HALO_GLES2_CONSTANT_LOG") != NULL;
+	if (constant_log)
 	{
 		static int logged;
 

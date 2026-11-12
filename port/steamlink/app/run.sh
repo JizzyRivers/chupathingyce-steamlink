@@ -31,6 +31,9 @@ fi
 mkdir -p "$data"
 export HALO_DATA_ROOT="$data"
 export HALO_SAVE_ROOT="$data/save"
+# (back + right on the d-pad saves one here, steamlink_combos.c)
+export HALO_SCREENSHOT_DIR="$data/screenshots"
+mkdir -p "$HALO_SCREENSHOT_DIR"
 # the shader compiler's load-time constants, which its driver worked out again
 # at every draw: a sixth of a frame at bloodgulch's spawn
 export VC_ENABLE_LTC=0

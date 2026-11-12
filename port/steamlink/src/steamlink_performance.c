@@ -29,7 +29,7 @@ and all kept in a cutscene and at the main menu. The driver's own share is launc
 compiler's load-time constants, worked out again at every draw, are off.
 
 Holding Back and pressing down on the d-pad (or F9) switches it, with a
-line on the screen (steamlink_performance_switch.c reads them: the game's
+line on the screen (steamlink_combos.c reads them, with the other combos: the game's
 headers and the system's do not meet in one file). The game's own flags
 (rasterizer_debug_options, the script's rasterizer_environment_decals and
 the rest) are set each frame while it is on, and put back as they were when

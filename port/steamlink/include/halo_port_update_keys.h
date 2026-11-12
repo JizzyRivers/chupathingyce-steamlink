@@ -1,0 +1,21 @@
+/*
+HALO_PORT_UPDATE_KEYS.H
+
+The Steam Link's releases are its own repository's, served from its own
+server (HALO_PORT_UPDATE_API, build.py) and signed with its own key
+(port/steamlink/release.py): the game's release key signs nothing that runs
+on the box (update_key.h includes this)
+*/
+
+#ifndef __HALO_PORT_UPDATE_KEYS_H
+#define __HALO_PORT_UPDATE_KEYS_H
+
+static const unsigned char update_public_keys[][32] =
+{
+	{
+		0x31, 0x6a, 0x54, 0x1f, 0x21, 0xa5, 0xa3, 0x9b, 0xfc, 0xcc, 0xba, 0xba, 0xca, 0xd2, 0x87, 0x99,
+		0xcb, 0x82, 0xac, 0x48, 0x36, 0x77, 0xce, 0xb3, 0xb2, 0xc2, 0x04, 0xca, 0x76, 0x02, 0x19, 0xb4,
+	},
+};
+
+#endif

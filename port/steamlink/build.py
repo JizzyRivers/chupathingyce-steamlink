@@ -8,7 +8,8 @@ dedicated server builds them), compiled for the 2015 Steam Link: 32-bit ARM
 filesystem is the box's (glibc 2.19 and its libraries) and whose toolchain
 has gcc 9.2's crt files and libgcc. The compiler is clang: any clang that
 has ARM, so the one on Linux, or LLVM's on Windows. The game's few x86
-assumptions in the shared code are patches/chupathingyce.
+assumptions in the shared code, and the console hooks this port fills in
+(port/linux/include/halo_console_features.h), are upstream's since 0.9.0.
 
 The result is build/steamlink/halo, linked with SDL3 (static, built with
 port/steamlink/toolchain.cmake: the workflow builds it).
@@ -67,10 +68,31 @@ STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
                           "-DHALO_CONSOLE_PERFORMANCE_MODE",
                           # a screen while the first start makes the cache
                           # files (src/steamlink_cache_screen.c)
-                          "-DHALO_CONSOLE_CACHE_SCREEN"]
+                          "-DHALO_CONSOLE_CACHE_SCREEN",
+                          # the start-up's screens on the television, no
+                          # dialogs (src/steamlink_setup.c)
+                          "-DHALO_CONSOLE_SETUP_SCREENS",
+                          # the box's certificate authorities are its
+                          # firmware's, of 2015: the app's own bundle, which
+                          # run.sh names in SSL_CERT_FILE
+                          "-DHALO_CONSOLE_APP_CERTIFICATES",
+                          # config.toml on the stick with the maps and saves
+                          # (run.sh's HALO_DATA_ROOT): the box puts the app
+                          # back as it was at each boot with a package there
+                          "-DHALO_CONSOLE_CONFIG_IN_DATA_ROOT"]
+# updates: this repository's releases, from warman.world (publish.py), laid
+# out as GitHub's, signed with the port's own key (include/
+# halo_port_update_keys.h, release.py); run.sh is replaced with the game, and
+# 42 is the exit that has run.sh start the new one
+STEAMLINK_UPDATES = ['-DHALO_PORT_UPDATE_PLATFORM=\\"steamlink\\"',
+                     '-DHALO_PORT_UPDATE_API=\\"https://warman.world/fastdl/chupathingyce-steamlink\\"',
+                     '-DHALO_PORT_UPDATE_REPOSITORY=\\"JizzyRivers/chupathingyce-steamlink\\"',
+                     '-DHALO_PORT_UPDATE_SCRIPT=\\"run.sh\\"',
+                     "-DHALO_PORT_UPDATE_RESTART_EXIT_CODE=42"]
 # the port's own platform units
 STEAMLINK_SOURCES = ["src/gles2_layer.c", "src/steamlink_audio.c", "src/steamlink_perf_log.c",
-                     "src/steamlink_performance_switch.c", "src/steamlink_cache_screen.c"]
+                     "src/steamlink_combos.c", "src/steamlink_cache_screen.c",
+                     "src/steamlink_setup.c"]
 # the port's units that see the game as its own sources do (no system headers)
 STEAMLINK_GAME_SOURCES = ["src/steamlink_performance.c"]
 # the sdk's gcc, for its crt files and libgcc (clang finds glibc in the root
@@ -164,7 +186,7 @@ def generate(n: Any, sln: Any, port: Any) -> None:
         embedded_assets=generated, rule="steamlink_cc", target_flags=target,
         instruction_set=STEAMLINK_INSTRUCTION_SET,
         # (and configure.py's console options: --release, --console-players)
-        extra_flags=[*STEAMLINK_ABI_FLAGS, *STEAMLINK_CAPABILITIES, *console_defines(sln)],
+        extra_flags=[*STEAMLINK_ABI_FLAGS, *STEAMLINK_CAPABILITIES, *STEAMLINK_UPDATES, *console_defines(sln)],
         platform_sources=[port.path(source) for source in STEAMLINK_SOURCES],
         game_unit_sources=[port.path(source) for source in STEAMLINK_GAME_SOURCES],
         # (ES 3's headers, Khronos', for its names: the sdk has ES 2's)

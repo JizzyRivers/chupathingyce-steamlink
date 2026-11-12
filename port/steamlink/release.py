@@ -1,9 +1,9 @@
 """release.py <key.pem> [fix]: a Steam Link release's files in build/release/,
 ready for a GitHub release tagged v<version>. The version is the game's, from
-the submodule's VERSION (0.8.1d), so a box says which game it is. A release of
-a fix of the port's own, on the same game, gives its number: 1 makes 0.8.1d1,
-which the updater takes as newer than 0.8.1d and older than the game's next,
-0.8.1e, so the boxes go through them in order:
+the submodule's VERSION (0.9.0d), so a box says which game it is. A release of
+a fix of the port's own, on the same game, gives its number: 1 makes 0.9.0d1,
+which the updater takes as newer than 0.9.0d and older than the game's next,
+0.9.0e, so the boxes go through them in order:
 
     chupathingyce.tgz                           the first install, from a stick
     chupathingyce-steamlink-release.zip         what the game's updater takes
