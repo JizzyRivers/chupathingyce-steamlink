@@ -3300,6 +3300,14 @@ static char *shader_translate(struct layer_shader *shader, const char *source)
 			text_add(&body, NORMPACKED3_UNPACK);
 			skipping = !memchr(text, '}', length - (size_t)(text - line));
 		}
+		else if (starts_with(text, "vec4 nv2a_finite("))
+		{
+			/* (0.9.1's: a not-a-number component made 0, by its bits, which
+			ES 1.00 has no operations on, nor isnan: as it is, as before
+			0.9.1. xgpu.h leaves a console its own body) */
+			text_add(&body, "vec4 nv2a_finite(vec4 v) { return v; }\n");
+			skipping = !memchr(text, '}', length - (size_t)(text - line));
+		}
 		else if (length >= sizeof(declaration))
 		{
 			replace_words(&body, line, length, words);
@@ -4017,10 +4025,43 @@ need go into c_bones (from layer_Uniform4fv's copy of c[]), and its node
 indices are given less that much: a copy of them, as for the packed
 normals. Every other draw, c_bones holds c[60] on as before. Vertices
 lowest to highest are the draw's */
+/* a skinned draw's rows and shifted node indices, kept: a model's draws are
+the same every frame (the first-person weapon's every one), and their scan
+was 2% of the game's time. Known by where the indices are, which vertices,
+the scale and a few of the indices' bytes, as the memory may be another
+model's later */
+#define BONES_SCANS 16
+
+static struct bones_scan
+{
+	const unsigned char *source, *weights;
+	GLsizei stride;
+	unsigned long lowest, highest;
+	GLfloat scale;
+	unsigned long sample;
+	long low, high;
+	/* the indices less the window, for window (0: none made) */
+	long shifted_window;
+	GLfloat *shifted;
+} bones_scans[BONES_SCANS];
+static int bones_scan_next;
+
+static unsigned long bones_scan_sample(const unsigned char *source, GLsizei stride, unsigned long lowest,
+	unsigned long highest)
+{
+	unsigned long middle = lowest + (highest - lowest) / 2, sample = 0;
+
+	memcpy(&sample, source + lowest * (unsigned long)stride, 2);
+	sample = sample * 31 + source[middle * (unsigned long)stride] + (source[middle * (unsigned long)stride + 1] << 8);
+	sample = sample * 31 + source[highest * (unsigned long)stride] + (source[highest * (unsigned long)stride + 1] << 8);
+	return sample;
+}
+
 static void bones_window_apply(unsigned long lowest, unsigned long highest)
 {
-	static GLfloat *shifted;
-	static unsigned long shifted_size;
+	struct bones_scan *scan = NULL;
+	unsigned long sample;
+	int index;
 	struct constant_split *split = program_current < LAYER_TRACKED ? constant_split[program_current] : NULL;
 	const struct layer_shader *vertex_shader;
 	struct layer_attribute *attribute;
@@ -4080,6 +4121,23 @@ static void bones_window_apply(unsigned long lowest, unsigned long highest)
 			return;
 		}
 	}
+	sample = bones_scan_sample(source, stride, lowest, highest);
+	for (index = 0; index < BONES_SCANS && !scan; index++)
+	{
+		struct bones_scan *kept = &bones_scans[index];
+
+		if (kept->source == source && kept->weights == weights && kept->stride == stride &&
+			kept->lowest == lowest && kept->highest == highest && kept->scale == scale && kept->sample == sample)
+		{
+			scan = kept;
+		}
+	}
+	if (scan)
+	{
+		low = scan->low;
+		high = scan->high;
+		goto scanned;
+	}
 	if (attribute->type == GL_UNSIGNED_BYTE && attribute->normalized)
 	{
 		static long table[256];
@@ -4124,6 +4182,20 @@ static void bones_window_apply(unsigned long lowest, unsigned long highest)
 				high = row + 2;
 		}
 	}
+	scan = &bones_scans[bones_scan_next];
+	bones_scan_next = (bones_scan_next + 1) % BONES_SCANS;
+	free(scan->shifted);
+	memset(scan, 0, sizeof(*scan));
+	scan->source = source;
+	scan->weights = weights;
+	scan->stride = stride;
+	scan->lowest = lowest;
+	scan->highest = highest;
+	scan->scale = scale;
+	scan->sample = sample;
+	scan->low = low;
+	scan->high = high;
+scanned:
 	if (high >= BONES_COUNT)
 	{
 		if (high - low >= BONES_COUNT || low < 0)
@@ -4149,32 +4221,31 @@ static void bones_window_apply(unsigned long lowest, unsigned long highest)
 		attribute_apply((GLuint)vertex_shader->node_attribute, attribute);
 		return;
 	}
-	if (shifted_size < highest - lowest + 1)
+	if (!scan->shifted || scan->shifted_window != window)
 	{
-		GLfloat *grown = realloc(shifted, (highest - lowest + 1) * 4 * sizeof(GLfloat));
-
-		if (!grown)
+		free(scan->shifted);
+		scan->shifted = malloc((highest - lowest + 1) * 4 * sizeof(GLfloat));
+		if (!scan->shifted)
 			return;
-		shifted = grown;
-		shifted_size = highest - lowest + 1;
-	}
-	for (vertex = lowest; vertex <= highest; vertex++)
-	{
-		const unsigned char *at = source + vertex * (unsigned long)stride;
-		GLfloat *to = shifted + (vertex - lowest) * 4;
-
-		for (component = 0; component < 4; component++)
+		for (vertex = lowest; vertex <= highest; vertex++)
 		{
-			to[component] = component < components ? attribute_component(attribute, at, component) :
-				(component == 3 ? 1.0f : 0.0f);
-			if (component < 2)
-				to[component] -= (GLfloat)window / scale;
+			const unsigned char *at = source + vertex * (unsigned long)stride;
+			GLfloat *to = scan->shifted + (vertex - lowest) * 4;
+
+			for (component = 0; component < 4; component++)
+			{
+				to[component] = component < components ? attribute_component(attribute, at, component) :
+					(component == 3 ? 1.0f : 0.0f);
+				if (component < 2)
+					to[component] -= (GLfloat)window / scale;
+			}
 		}
+		scan->shifted_window = window;
 	}
 	counts.pointers++;
 	real.BindBuffer(GL_ARRAY_BUFFER, 0);
 	real.VertexAttribPointer((GLuint)vertex_shader->node_attribute, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
-		shifted - lowest * 4);
+		scan->shifted - lowest * 4);
 }
 
 /* HALO_GLES2_SKIN_LOG: the first skinned draws' attributes (their formats

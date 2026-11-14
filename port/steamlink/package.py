@@ -35,9 +35,12 @@ LICENSES = {
     "zlib-LICENSE.txt": "chupathingyce/port/third_party/zlib/LICENSE",
     "Overpass-OFL.txt": "chupathingyce/port/assets/fonts/Overpass-OFL.txt",
     "CyborgInterfaceGothic-OFL.txt": "chupathingyce/port/assets/fonts/CyborgInterfaceGothic-OFL.txt",
-    "OpenCE-OFL.txt": "chupathingyce/port/assets/fonts/OpenCE-OFL.txt",
+    "ChupathingyTitles-OFL.txt": "chupathingyce/port/assets/fonts/ChupathingyTitles-OFL.txt",
     "NotoSans-OFL.txt": "chupathingyce/port/linux/ui/fonts/OFL.txt",
     "Kenney-Input-Prompts-CC0.txt": "chupathingyce/port/linux/ui/fonts/KENNEY-CC0.txt",
+    # (the overlay's fonts and the scoreboard's platform logos, and where each
+    # is from)
+    "overlay-fonts-README.md": "chupathingyce/port/linux/ui/fonts/README.md",
 }
 
 

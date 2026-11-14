@@ -26,6 +26,10 @@ static const char *const phase_names[NUMBER_OF_HALO_PERF_PHASES] =
 {
 	"tick", "render", "world", "objects", "transparent", "effects", "hud", "sound", "network", "present", "vsync",
 	"begin", "setup", "flares", "screen effect", "end", "render sound", "occlusion wait", "texture wait",
+	/* (the tick's parts, and the objects' update's: 0.9.1's) */
+	"units", "ai", "tick effects", "game engine", "tick objects", "physics", "collision", "netcode",
+	"bipeds", "vehicles", "weapons", "items", "projectiles", "other objects", "damage", "nodes", "functions",
+	"object lights", "activation", "garbage",
 };
 
 static Uint64 started[NUMBER_OF_HALO_PERF_PHASES];

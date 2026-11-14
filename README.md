@@ -25,7 +25,7 @@ steps
 leave the stick in. maps, saves, settings n the log all live on it in chupathingyce/, the box doesnt have the room. pull it while its running n ur on ur own
 
 updates
-when a new version is out the game asks at startup, A updates, B not now, Y dont ask again. updates come from warman.world n r signed so the box only takes ours. versions follow chupathingyce's, 0.9.0d is the game's 0.9.0d, a steam link only fix on top is 0.9.0d1
+when a new version is out the game asks at startup, A updates, B not now, Y dont ask again. updates come from warman.world n r signed so the box only takes ours. versions follow chupathingyce's, 0.9.1 is the game's 0.9.1
 
 if it breaks
 send me chupathingyce/run.log off the stick, thats the good stuff
@@ -80,7 +80,7 @@ building the game
 clang (any clang w arm, llvm's on windows works too) + valve's sdk (https://github.com/ValveSoftware/steamlink-sdk) for the box's glibc and gcc's crt files. the sdk's kernel folder has a file called aux.c which windows wont check out, so sparse checkout rootfs and toolchain/lib/gcc only
 - clone the sdk next to this as steamlink-sdk (or set MARVELL_SDK_PATH)
 - sdl3 3.4.16 w port/steamlink/toolchain.cmake, the options .github/workflows/probe.yml uses, installed to build/sdl3
-- git submodule update --init (its on chupathingyce v0.9.0d, as is, no patches)
+- git submodule update --init (its on chupathingyce v0.9.1, as is, no patches)
 - cd chupathingyce && python3 configure.py --release --console-port ../port/steamlink && ninja steamlink
 - out comes chupathingyce/build/steamlink/halo. python port/steamlink/package.py makes build/chupathingyce.tgz to install from a stick
 - a release needs its version from the submodule n the signing key: python port/steamlink/release.py <key.pem> [fix number]. the key stays off every repo, nobody touches the key

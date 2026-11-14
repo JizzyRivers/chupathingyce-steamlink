@@ -43,7 +43,11 @@ STEAMLINK_INSTRUCTION_SET = ["-mcpu=cortex-a9", "-mfpu=neon", "-mfloat-abi=hard"
 # of floats with vldr, which faults on the 2-byte aligned ones in a map's
 # animation data, where an integer load is fixed up (the box's kernel fixes
 # ldm and ldrd, /proc/cpu/alignment, and ldr needs none)
-STEAMLINK_ABI_FLAGS = ["-fsigned-char", "-mno-implicit-float", "-DHALO_STEAMLINK"]
+STEAMLINK_ABI_FLAGS = ["-fsigned-char", "-mno-implicit-float", "-DHALO_STEAMLINK",
+                       # glibc 2.19 has no MAP_FIXED_NOREPLACE (2.28): its value, which
+                       # the box's 3.8 kernel takes as a hint, and every use checks the
+                       # address it got (xbox_memory.c defines it so, mcc_memory.c not)
+                       "-DMAP_FIXED_NOREPLACE=0x100000"]
 # the box's 256 MB (about 200 free): the Xbox's texture cache (22 MB, not the
 # desktop's 256) and its structure surfaces and dynamic triangles a frame,
 # as the Xbox 360's port has them (port/linux/include/halo_port_capacity.h)
@@ -79,7 +83,25 @@ STEAMLINK_CAPABILITIES = ["-DHALO_CONSOLE_XBOX_RENDER_SIZES",
                           # config.toml on the stick with the maps and saves
                           # (run.sh's HALO_DATA_ROOT): the box puts the app
                           # back as it was at each boot with a package there
-                          "-DHALO_CONSOLE_CONFIG_IN_DATA_ROOT"]
+                          "-DHALO_CONSOLE_CONFIG_IN_DATA_ROOT",
+                          # no screenshots or clips of the desktop's: they read
+                          # the picture back with mapped buffers and fences, which
+                          # ES 2 has not (Back + right is the box's screenshot,
+                          # src/steamlink_combos.c)
+                          "-DHALO_CONSOLE_NO_CAPTURE",
+                          # (0.9.1's for consoles, which the box is, for its
+                          # memory and its one core: the Xbox's limits on a
+                          # match's lights and on particles, the consoles' map
+                          # list, and none of the Guide, the medals' icons or
+                          # the second set of titles)
+                          "-DHALO_CONSOLE_MATCH_LIGHT_LIMITS",
+                          "-DHALO_CONSOLE_MAP_LIST_ROWS=256",
+                          '-DHALO_CONSOLE_PARTICLE_LIMIT=\\"1024\\"',
+                          "-DHALO_CONSOLE_NO_GUIDE",
+                          "-DHALO_CONSOLE_NO_MEDAL_ICONS",
+                          # (HALO_CONSOLE_NO_STUBBS does not compile at v0.9.1:
+                          # damage.c; upstream's #1219 after it)
+                          "-DHALO_CONSOLE_NO_TITLE_CHOICE"]
 # updates: this repository's releases, from warman.world (publish.py), laid
 # out as GitHub's, signed with the port's own key (include/
 # halo_port_update_keys.h, release.py); run.sh is replaced with the game, and
